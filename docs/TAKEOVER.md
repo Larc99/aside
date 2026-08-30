@@ -1,6 +1,6 @@
 # Aside takeover guide
 
-Status date: 2026-08-29
+Status date: 2026-08-30
 
 This is the current maintainer map for the project.
 
@@ -37,7 +37,8 @@ echo so the editor does not lose first responder.
 
 ## Current verification baseline
 
-- `swift test`: 99 tests passing (no flakes across repeated runs).
+- `swift test`: 100 tests passing (no flakes across repeated runs, including
+  under CPU contention).
 - `swift build`: no compiler warnings. Under the non-default
   `-strict-concurrency=complete` the package still reports ~66 warnings
   (it ships in Swift 5 language mode); this is down from 68 but is not clean,
@@ -58,7 +59,7 @@ echo so the editor does not lose first responder.
 3. Decide whether sync-folder mode belongs in the default product surface. It
    is well tested, but it changes the privacy model from encrypted SQLite to
    plaintext Markdown.
-5. Replace the hard-coded bundle version in `scripts/make_app.sh` with release
+4. Replace the hard-coded bundle version in `scripts/make_app.sh` with release
    metadata before publishing builds.
 
 ## Maintenance rules
