@@ -165,7 +165,7 @@ struct OnboardingView: View {
             hint: "no click, no keyboard"
         ),
         OnboardingPage(
-            title: "Open one and start typing",
+            title: "Open one and\nstart typing",
             body: "The note grows into an editor in place. Type and it saves as you go — no save button, no window to manage. Pick a color from the row along the bottom.",
             key: "⌥⌘N",
             hint: "creates a new note from anywhere"
