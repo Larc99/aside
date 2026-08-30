@@ -50,8 +50,20 @@ if [ -d "$BIN/${APP_NAME}_Aside.bundle" ]; then
     cp -R "$BIN/${APP_NAME}_Aside.bundle" "$APP/Contents/Resources/"
 fi
 
-codesign --force --sign - \
-    --entitlements scripts/Aside.entitlements \
-    "$APP"
+# Release builds export ASIDE_SIGN_IDENTITY (a Developer ID Application
+# identity) so the result can be notarized; the hardened runtime and a secure
+# timestamp are both required for that and cannot be added afterwards. Without
+# it we ad-hoc sign, which runs fine locally and in CI but will not pass
+# Gatekeeper on anyone else's Mac.
+if [ -n "${ASIDE_SIGN_IDENTITY:-}" ]; then
+    codesign --force --options runtime --timestamp \
+        --sign "$ASIDE_SIGN_IDENTITY" \
+        --entitlements scripts/Aside.entitlements \
+        "$APP"
+else
+    codesign --force --sign - \
+        --entitlements scripts/Aside.entitlements \
+        "$APP"
+fi
 
 echo "Built $APP"
