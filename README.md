@@ -77,7 +77,17 @@ including the parts deliberately left in plaintext.
 
 ## Installing
 
-There is no notarized release yet, so for now Aside is built from source:
+Download **Aside.zip** from the
+[latest release](https://github.com/Larc99/aside/releases/latest), unzip it,
+and drag `Aside.app` into your Applications folder.
+
+The build is signed and notarized by Apple, so it opens normally — no
+right-clicking, no trip through System Settings. Requires macOS 15 or later.
+
+Aside has no Dock icon. After launching it, look for the coloured strip on the
+edge of your screen and the menu-bar item.
+
+### Building from source
 
 ```bash
 git clone https://github.com/Larc99/aside.git
@@ -86,9 +96,9 @@ scripts/make_app.sh
 open build/Aside.app
 ```
 
-Requires macOS 15 or later and a Swift 6 toolchain (Xcode 16+). The build is
-sandboxed and ad-hoc signed, which is why macOS asks you to confirm the first
-launch.
+Needs a Swift 6 toolchain (Xcode 16+). Builds this way are ad-hoc signed, which
+is fine to run locally. See [docs/RELEASING.md](docs/RELEASING.md) for how
+distributable builds are signed and notarized.
 
 ## Contributing
 
