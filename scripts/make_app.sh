@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 APP_NAME="Aside"
 BUNDLE_ID="app.aside.Aside"
-VERSION="0.1.0"
+VERSION="0.1.1"
 OUT_DIR="${1:-build}"
 APP="$OUT_DIR/$APP_NAME.app"
 
@@ -30,7 +30,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>
