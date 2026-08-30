@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Aside",
+    name: "StickyDeck",
     platforms: [
         .macOS(.v15)
     ],
@@ -11,7 +11,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "Aside",
+            name: "StickyDeck",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
@@ -21,9 +21,9 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
-            name: "AsideTests",
+            name: "StickyDeckTests",
             dependencies: [
-                .target(name: "Aside"),
+                .target(name: "StickyDeck"),
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]

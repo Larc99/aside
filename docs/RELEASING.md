@@ -19,7 +19,7 @@ Then store notarization credentials once, using an app-specific password
 created at appleid.apple.com:
 
 ```bash
-xcrun notarytool store-credentials aside-notary \
+xcrun notarytool store-credentials stickydeck-notary \
     --apple-id "you@example.com" --team-id "TEAMID" --password "app-specific-password"
 ```
 
@@ -30,13 +30,13 @@ xcrun notarytool store-credentials aside-notary \
 swift test
 
 # 2. Build, sign, notarize, staple, verify — all of it:
-export ASIDE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export STICKYDECK_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 scripts/release.sh
 
 # 3. Tag and publish, attaching the zip:
-git tag -a v0.2.0 -m "Aside 0.2.0"
+git tag -a v0.2.0 -m "StickyDeck 0.2.0"
 git push origin v0.2.0
-gh release create v0.2.0 --title "Aside 0.2.0" --notes "..." build/Aside.zip
+gh release create v0.2.0 --title "StickyDeck 0.2.0" --notes "..." build/StickyDeck.zip
 ```
 
 `release.sh` ends by running `spctl --assess`, which must report
@@ -48,7 +48,7 @@ because your own builds are never quarantined.
 
 - **The hardened runtime** (`--options runtime`) is required for notarization
   and cannot be added after signing. `make_app.sh` applies it whenever
-  `ASIDE_SIGN_IDENTITY` is set.
+  `STICKYDECK_SIGN_IDENTITY` is set.
 - **The ticket staples to the `.app`, not the zip.** The archive you upload has
   to be built *after* stapling. `release.sh` deliberately zips twice for this
   reason; do not "optimise" the second one away.
@@ -56,10 +56,10 @@ because your own builds are never quarantined.
   sync-folder security-scoped bookmark.
 
 On rejection, `xcrun notarytool log <submission-id> --keychain-profile
-aside-notary` names the offending binary and why.
+stickydeck-notary` names the offending binary and why.
 
 ## Third-party obligations
 
 Any distributed build carries the bundled fonts, so it carries their licence
-too. `make_app.sh` copies `Sources/Aside/Resources/Fonts/` wholesale, which
+too. `make_app.sh` copies `Sources/StickyDeck/Resources/Fonts/` wholesale, which
 includes `OFL.txt` — do not tidy that file out of the resource copy.

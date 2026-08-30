@@ -1,11 +1,11 @@
 #!/bin/bash
-# Assembles a proper Aside.app bundle from a release SPM build and
+# Assembles a proper StickyDeck.app bundle from a release SPM build and
 # ad-hoc signs it (sandboxed). Usage: scripts/make_app.sh [output-dir]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-APP_NAME="Aside"
-BUNDLE_ID="app.aside.Aside"
+APP_NAME="StickyDeck"
+BUNDLE_ID="app.stickydeck.StickyDeck"
 VERSION="0.1.1"
 OUT_DIR="${1:-build}"
 APP="$OUT_DIR/$APP_NAME.app"
@@ -25,7 +25,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>Aside</string>
+    <key>CFBundleDisplayName</key><string>StickyDeck</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -42,27 +42,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 cp "$BIN/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
-cp -R Sources/Aside/Resources/Fonts "$APP/Contents/Resources/Fonts"
+cp -R Sources/StickyDeck/Resources/Fonts "$APP/Contents/Resources/Fonts"
 
 # SPM resource bundle must ship next to the executable's resources, otherwise
 # the generated Bundle.module accessor aborts the process on first touch.
-if [ -d "$BIN/${APP_NAME}_Aside.bundle" ]; then
-    cp -R "$BIN/${APP_NAME}_Aside.bundle" "$APP/Contents/Resources/"
+if [ -d "$BIN/${APP_NAME}_StickyDeck.bundle" ]; then
+    cp -R "$BIN/${APP_NAME}_StickyDeck.bundle" "$APP/Contents/Resources/"
 fi
 
-# Release builds export ASIDE_SIGN_IDENTITY (a Developer ID Application
+# Release builds export STICKYDECK_SIGN_IDENTITY (a Developer ID Application
 # identity) so the result can be notarized; the hardened runtime and a secure
 # timestamp are both required for that and cannot be added afterwards. Without
 # it we ad-hoc sign, which runs fine locally and in CI but will not pass
 # Gatekeeper on anyone else's Mac.
-if [ -n "${ASIDE_SIGN_IDENTITY:-}" ]; then
+if [ -n "${STICKYDECK_SIGN_IDENTITY:-}" ]; then
     codesign --force --options runtime --timestamp \
-        --sign "$ASIDE_SIGN_IDENTITY" \
-        --entitlements scripts/Aside.entitlements \
+        --sign "$STICKYDECK_SIGN_IDENTITY" \
+        --entitlements scripts/StickyDeck.entitlements \
         "$APP"
 else
     codesign --force --sign - \
-        --entitlements scripts/Aside.entitlements \
+        --entitlements scripts/StickyDeck.entitlements \
         "$APP"
 fi
 

@@ -2,10 +2,10 @@
 
 Audit date: 2026-08-29
 
-This audit covers the SwiftUI/AppKit UI of Aside as an `LSUIElement` accessory
+This audit covers the SwiftUI/AppKit UI of StickyDeck as an `LSUIElement` accessory
 app. The source observations refer to commit `c15be9a`, immediately before the
 concurrent native-UX implementation pass began, and use current first-party Apple
-documentation only. Aside's established geometry, listed below, is treated as a
+documentation only. StickyDeck's established geometry, listed below, is treated as a
 fixed product constraint.
 
 ## Fixed layout constraints
@@ -46,9 +46,9 @@ standard controls or `accessibilityRepresentation` for custom controls.
 
 Relevant code:
 
-- `Sources/Aside/Deck/DeckViews.swift`: `PillView`, `DeckTabView`, `PlusButton`,
+- `Sources/StickyDeck/Deck/DeckViews.swift`: `PillView`, `DeckTabView`, `PlusButton`,
   `MoreTile`.
-- `Sources/Aside/App/StatusItemController.swift`: alternative global routes.
+- `Sources/StickyDeck/App/StatusItemController.swift`: alternative global routes.
 
 Apple sources:
 
@@ -65,13 +65,13 @@ The deck and sticky windows correctly use borderless, nonactivating `NSPanel`s a
 the hit view returns `true` from `needsPanelToBecomeKey`. Verify and enforce these
 states rather than relying on incidental SwiftUI hosting behavior:
 
-1. Hovering a pill, tab, `+`, or menu must not activate Aside or steal keyboard
+1. Hovering a pill, tab, `+`, or menu must not activate StickyDeck or steal keyboard
    focus from the frontmost app.
 2. Clicking title/body text must make the panel key and place the insertion point in
    the intended field on the first click.
 3. Clicking a nonediting control must not unexpectedly discard editor selection.
 4. Closing/unpinning must return focus cleanly to the previously active app.
-5. Opening All Notes, Archive, Settings, or onboarding should activate Aside and
+5. Opening All Notes, Archive, Settings, or onboarding should activate StickyDeck and
    make the requested window key.
 
 An AppKit bridge around the hosted text controls can explicitly report
@@ -92,7 +92,7 @@ Visual impact: none; this makes the existing interaction deterministic.
 `DeckPanel`, `PillPanel`, and `StickyPanel` switch from `.floating` to
 `.modalPanel` when “Show over full-screen apps” is enabled. Apple defines
 `.floating` as the level for floating palettes and `.modalPanel` as the level for a
-modal panel. Aside panels are not modal. Keep them at `.floating` and implement
+modal panel. StickyDeck panels are not modal. Keep them at `.floating` and implement
 the preference through collection behavior instead.
 
 The current collection behavior always contains `.fullScreenAuxiliary`, even when
@@ -290,7 +290,7 @@ provides Command-Comma and mirrors edge/full-screen controls in deck menus.
 Recommended refinements:
 
 - Remove or disable the enabled minimize button.
-- Use “Aside Settings” as the one-pane title, as the app already does.
+- Use “StickyDeck Settings” as the one-pane title, as the app already does.
 - Keep the current three sections until another pane is genuinely necessary; do not
   add a toolbar for a single pane.
 - Make Reduce Motion a system override rather than another app preference.
@@ -341,7 +341,7 @@ cursor only over the draggable header, matching the behavioral spec. Clamp the c
 after every drag and display-configuration change.
 
 Apple’s general floating-panel guidance normally says a floating panel hides when
-the app deactivates. Aside deliberately differs because cross-app persistence is
+the app deactivates. StickyDeck deliberately differs because cross-app persistence is
 the core pinned-note behavior.
 
 Apple source: [`NSPanel.isFloatingPanel`](https://developer.apple.com/documentation/appkit/nspanel/isfloatingpanel)
@@ -356,7 +356,7 @@ Before calling the UI native-quality complete, run this matrix on both screen ed
    Return on the focused primary action, Escape, Command-W, Command-F, and Command-Z
    in every responder state.
 3. Focus: frontmost third-party app remains active on deck hover; the first editor
-   click types immediately; opening normal windows activates Aside; closing them
+   click types immediately; opening normal windows activates StickyDeck; closing them
    restores a predictable front app.
 4. Accessibility: VoiceOver traversal/actions, Voice Control labels, Full Keyboard
    Access, Reduce Motion, Reduce Transparency, Increase Contrast, Differentiate

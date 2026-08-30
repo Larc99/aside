@@ -1,6 +1,6 @@
-# Contributing to Aside
+# Contributing to StickyDeck
 
-Thanks for taking a look. Aside is a small, single-purpose macOS app, and it is
+Thanks for taking a look. StickyDeck is a small, single-purpose macOS app, and it is
 easy to build: no Xcode project, no code generation, no accounts.
 
 By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -8,11 +8,11 @@ By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 ## Getting it running
 
 ```bash
-git clone https://github.com/Larc99/aside.git
-cd aside
+git clone https://github.com/Larc99/stickydeck.git
+cd stickydeck
 swift build          # debug binary
 swift test           # unit tests
-scripts/make_app.sh  # assembles build/Aside.app (sandboxed, ad-hoc signed)
+scripts/make_app.sh  # assembles build/StickyDeck.app (sandboxed, ad-hoc signed)
 ```
 
 You need macOS 15 or later and a Swift 6 toolchain (Xcode 16+). The only
@@ -21,12 +21,12 @@ dependency is [GRDB](https://github.com/groue/GRDB.swift).
 `swift run` works for quick iteration, but several behaviours only appear in
 the assembled bundle — the sandbox, the security-scoped bookmark used by
 sync-folder mode, and the bundled fonts. **Verify anything to do with windows,
-permissions or geometry in `build/Aside.app`, not through `swift run`.**
+permissions or geometry in `build/StickyDeck.app`, not through `swift run`.**
 
 ## Where things live
 
 ```
-Sources/Aside/
+Sources/StickyDeck/
   App/          entry point, settings, status item, app lifecycle
   Models/       Note + the five-colour palette
   Persistence/  GRDB store, the NoteStore protocol, the sync-folder store
@@ -84,7 +84,7 @@ edited elsewhere. Writing a snapshot resurrects it. Route content saves through
 copy.
 
 **Never point a debug run at your real library.** Always set
-`ASIDE_DEBUG_DATA_DIR` to an isolated name, and `ASIDE_DEBUG_DISABLE_SYNC=1` so
+`STICKYDECK_DEBUG_DATA_DIR` to an isolated name, and `STICKYDECK_DEBUG_DISABLE_SYNC=1` so
 a saved sync-folder bookmark is not inherited.
 
 ## Debug hooks
@@ -94,19 +94,19 @@ env-gated and do nothing otherwise.
 
 | Variable | Effect |
 |---|---|
-| `ASIDE_DEBUG_DATA_DIR=name` | Use an isolated database under the app's temporary directory |
-| `ASIDE_DEBUG_DISABLE_SYNC=1` | Ignore any saved sync-folder bookmark |
-| `ASIDE_DEBUG_SEED=1` | Seed an empty database with representative notes |
-| `ASIDE_DEBUG_FAN=1` | Open the deck fan on launch, with hover-collapse suspended |
-| `ASIDE_DEBUG_EXPAND=1` | Also expand the first note |
-| `ASIDE_DEBUG_ALL_NOTES=1` | Open the All Notes window on launch |
-| `ASIDE_DEBUG_AUTOSAVE=1` | Simulate typing bursts to check editor focus survives autosaves. Requires `ASIDE_DEBUG_DATA_DIR`, because it overwrites a note's body repeatedly |
+| `STICKYDECK_DEBUG_DATA_DIR=name` | Use an isolated database under the app's temporary directory |
+| `STICKYDECK_DEBUG_DISABLE_SYNC=1` | Ignore any saved sync-folder bookmark |
+| `STICKYDECK_DEBUG_SEED=1` | Seed an empty database with representative notes |
+| `STICKYDECK_DEBUG_FAN=1` | Open the deck fan on launch, with hover-collapse suspended |
+| `STICKYDECK_DEBUG_EXPAND=1` | Also expand the first note |
+| `STICKYDECK_DEBUG_ALL_NOTES=1` | Open the All Notes window on launch |
+| `STICKYDECK_DEBUG_AUTOSAVE=1` | Simulate typing bursts to check editor focus survives autosaves. Requires `STICKYDECK_DEBUG_DATA_DIR`, because it overwrites a note's body repeatedly |
 
 A typical visual-QA run:
 
 ```bash
-ASIDE_DEBUG_DATA_DIR=qa ASIDE_DEBUG_DISABLE_SYNC=1 ASIDE_DEBUG_SEED=1 \
-  ASIDE_DEBUG_FAN=1 build/Aside.app/Contents/MacOS/Aside
+STICKYDECK_DEBUG_DATA_DIR=qa STICKYDECK_DEBUG_DISABLE_SYNC=1 STICKYDECK_DEBUG_SEED=1 \
+  STICKYDECK_DEBUG_FAN=1 build/StickyDeck.app/Contents/MacOS/StickyDeck
 ```
 
 ## Testing

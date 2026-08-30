@@ -37,7 +37,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the maintainers by opening a [private security advisory](https://github.com/Larc99/aside/security/advisories/new), which is visible only to the maintainers, or by contacting [@Larc99](https://github.com/Larc99) directly on GitHub. Please do not report conduct issues in a public issue. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the maintainers by opening a [private security advisory](https://github.com/Larc99/stickydeck/security/advisories/new), which is visible only to the maintainers, or by contacting [@Larc99](https://github.com/Larc99) directly on GitHub. Please do not report conduct issues in a public issue. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

@@ -1,9 +1,9 @@
-# Aside
+# StickyDeck
 
 **Sticky notes that live at the edge of your screen. Reach over and they fan
 out.**
 
-Aside sits as a thin strip on the edge of your display — one small coloured
+StickyDeck sits as a thin strip on the edge of your display — one small coloured
 dash per note, and nothing else. Move the pointer over it and your notes fan
 out like a deck of cards. Click one and it opens into an editor, right there.
 Move away and it all folds back. No Dock icon, no window to manage, no app to
@@ -11,9 +11,9 @@ switch to.
 
 Free, open source, and entirely offline.
 
-<!-- TODO: screenshot of the fanned deck goes here. Stage it with ASIDE_DEBUG_SEED=1 ASIDE_DEBUG_FAN=1. -->
+<!-- TODO: screenshot of the fanned deck goes here. Stage it with STICKYDECK_DEBUG_SEED=1 STICKYDECK_DEBUG_FAN=1. -->
 
-[![CI](https://github.com/Larc99/aside/actions/workflows/ci.yml/badge.svg)](https://github.com/Larc99/aside/actions/workflows/ci.yml)
+[![CI](https://github.com/Larc99/stickydeck/actions/workflows/ci.yml/badge.svg)](https://github.com/Larc99/stickydeck/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 ![Platform: macOS 15+](https://img.shields.io/badge/Platform-macOS%2015%2B-black.svg)
 
@@ -24,7 +24,7 @@ is. It is built for the note you need for the next ten minutes — a phone
 number, a command you keep forgetting, the thing you promised to do after this
 meeting — not for a knowledge base.
 
-Aside is inspired by [Hold My Notes](https://holdmynotes.app/), a paid Mac app
+StickyDeck is inspired by [Hold My Notes](https://holdmynotes.app/), a paid Mac app
 by [@shobhit99](https://github.com/shobhit99) that got this idea exactly right.
 I wanted it, balked at the $6.99, and decided building my own was the more
 interesting way to spend the money I was saving. That is the entire origin
@@ -58,7 +58,7 @@ version, go buy theirs. It is six dollars and it is good.
 ## Privacy
 
 Your notes stay on your Mac. Note bodies are AES-GCM encrypted before they are
-written, with the key in your login keychain. Aside makes no network
+written, with the key in your login keychain. StickyDeck makes no network
 connections at all — no accounts, no telemetry, no crash reporting, and no
 third-party SDKs beyond its database library.
 
@@ -77,23 +77,23 @@ including the parts deliberately left in plaintext.
 
 ## Installing
 
-Download **Aside.zip** from the
-[latest release](https://github.com/Larc99/aside/releases/latest), unzip it,
-and drag `Aside.app` into your Applications folder.
+Download **StickyDeck.zip** from the
+[latest release](https://github.com/Larc99/stickydeck/releases/latest), unzip it,
+and drag `StickyDeck.app` into your Applications folder.
 
 The build is signed and notarized by Apple, so it opens normally — no
 right-clicking, no trip through System Settings. Requires macOS 15 or later.
 
-Aside has no Dock icon. After launching it, look for the coloured strip on the
+StickyDeck has no Dock icon. After launching it, look for the coloured strip on the
 edge of your screen and the menu-bar item.
 
 ### Building from source
 
 ```bash
-git clone https://github.com/Larc99/aside.git
-cd aside
+git clone https://github.com/Larc99/stickydeck.git
+cd stickydeck
 scripts/make_app.sh
-open build/Aside.app
+open build/StickyDeck.app
 ```
 
 Needs a Swift 6 toolchain (Xcode 16+). Builds this way are ad-hoc signed, which
@@ -125,5 +125,5 @@ Good places to start are listed in [docs/TAKEOVER.md](docs/TAKEOVER.md) under
 MIT — see [LICENSE](LICENSE).
 
 The bundled fonts are not MIT — they are SIL OFL 1.1, and
-[their licence](Sources/Aside/Resources/Fonts/OFL.txt) has to ship with them.
+[their licence](Sources/StickyDeck/Resources/Fonts/OFL.txt) has to ship with them.
 The one dependency, [GRDB](https://github.com/groue/GRDB.swift), is MIT.

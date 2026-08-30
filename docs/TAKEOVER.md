@@ -1,4 +1,4 @@
-# Aside takeover guide
+# StickyDeck takeover guide
 
 Status date: 2026-08-30
 
@@ -6,7 +6,7 @@ This is the current maintainer map for the project.
 
 ## Product boundary
 
-Aside is a free, open-source sticky-notes app for macOS, written from scratch.
+StickyDeck is a free, open-source sticky-notes app for macOS, written from scratch.
 `SPEC.md` is the behavioural contract. Licence and subscription UI are
 deliberately absent. Sync-folder storage and custom fonts are extensions beyond
 the app's original scope.
@@ -46,7 +46,7 @@ echo so the editor does not lose first responder.
 - `scripts/make_app.sh`: production build, sandbox signing, and app assembly
   passing.
 - Debug/visual runs can isolate their database with the documented
-  `ASIDE_DEBUG_*` variables; a relative data-dir name resolves inside the
+  `STICKYDECK_DEBUG_*` variables; a relative data-dir name resolves inside the
   sandbox temporary directory and never touches the normal note library.
 
 ## Highest-value remaining work

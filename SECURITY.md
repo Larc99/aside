@@ -3,18 +3,18 @@
 ## Reporting a vulnerability
 
 Please report security issues privately through GitHub's
-[private vulnerability reporting](https://github.com/Larc99/aside/security/advisories/new)
+[private vulnerability reporting](https://github.com/Larc99/stickydeck/security/advisories/new)
 rather than opening a public issue. Include the version or commit, your macOS
 version, and what an attacker would gain.
 
-## What Aside does with your notes
+## What StickyDeck does with your notes
 
 - Notes live in a SQLite database inside the app's sandbox container.
 - Note **bodies** are encrypted with AES-GCM before they are written.
 - The key is 256-bit and lives in your login keychain. If the keychain is
   unavailable at first launch, the app falls back to a key file created with
   `0600` permissions in the same container.
-- Aside makes no network connections. The sandbox entitlement for outbound
+- StickyDeck makes no network connections. The sandbox entitlement for outbound
   network access is explicitly disabled, and there is no analytics, telemetry,
   crash reporting, or third-party SDK beyond GRDB.
 - File access is limited to locations you choose yourself, through the standard
@@ -46,7 +46,7 @@ Being explicit about this matters more than the encryption does.
 
 ## Scope
 
-Aside is a local, offline note-taking app with no account, no server and no
+StickyDeck is a local, offline note-taking app with no account, no server and no
 network access. The realistic threat model is a stolen backup or a shared
 machine. It is not designed to withstand a determined attacker who already has
 code execution as your user.

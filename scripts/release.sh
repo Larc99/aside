@@ -1,23 +1,23 @@
 #!/bin/bash
-# Builds, signs, notarizes and staples a distributable Aside.app, then leaves a
+# Builds, signs, notarizes and staples a distributable StickyDeck.app, then leaves a
 # zip ready to attach to a GitHub release.
 #
-#   export ASIDE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+#   export STICKYDECK_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 #   scripts/release.sh
 #
-# Requires a notarytool credential profile (default name: aside-notary), made
+# Requires a notarytool credential profile (default name: stickydeck-notary), made
 # once with `xcrun notarytool store-credentials`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-: "${ASIDE_SIGN_IDENTITY:?Set ASIDE_SIGN_IDENTITY to your Developer ID Application identity}"
-PROFILE="${ASIDE_NOTARY_PROFILE:-aside-notary}"
+: "${STICKYDECK_SIGN_IDENTITY:?Set STICKYDECK_SIGN_IDENTITY to your Developer ID Application identity}"
+PROFILE="${STICKYDECK_NOTARY_PROFILE:-stickydeck-notary}"
 OUT_DIR="${1:-build}"
-APP="$OUT_DIR/Aside.app"
-ZIP="$OUT_DIR/Aside.zip"
+APP="$OUT_DIR/StickyDeck.app"
+ZIP="$OUT_DIR/StickyDeck.zip"
 
-echo "==> Building and signing as: $ASIDE_SIGN_IDENTITY"
-ASIDE_SIGN_IDENTITY="$ASIDE_SIGN_IDENTITY" scripts/make_app.sh "$OUT_DIR"
+echo "==> Building and signing as: $STICKYDECK_SIGN_IDENTITY"
+STICKYDECK_SIGN_IDENTITY="$STICKYDECK_SIGN_IDENTITY" scripts/make_app.sh "$OUT_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo "==> Submitting for notarization (this usually takes a few minutes)"

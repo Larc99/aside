@@ -1,9 +1,9 @@
-# Aside — Behavioral Spec
+# StickyDeck — Behavioral Spec
 
-The behavioural contract for Aside: what the app does, and where a choice was
+The behavioural contract for StickyDeck: what the app does, and where a choice was
 deliberate rather than incidental. All code, UI copy, icons and design are written
-from scratch. Aside is free and open source, so licence and subscription behaviour
-is intentionally absent. Sections marked **Aside extension** go beyond the app's
+from scratch. StickyDeck is free and open source, so licence and subscription behaviour
+is intentionally absent. Sections marked **StickyDeck extension** go beyond the app's
 original scope.
 
 ## Core concept
@@ -37,7 +37,7 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
   unpins it and returns it to the deck.
 - Pinned notes are desktop windows only: the fan/deck excludes them (D8).
 
-## Locking — Aside extension / deferred
+## Locking — StickyDeck extension / deferred
 - "Hide note contents until you authenticate" — blurs/hides body until local
   authentication; re-auth to reveal.
 - Locked notes are excluded from sync-folder mode (their bodies would be
@@ -73,11 +73,12 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
 ## Storage
 1. **Local** — SQLite (GRDB); note *bodies* encrypted at rest (AES-GCM), key in the
    login keychain. Metadata (title, color, dates) in plaintext columns.
-2. **Sync folder — Aside extension** — optional user-chosen folder (e.g. iCloud Drive): notes written
+2. **Sync folder — StickyDeck extension** — optional user-chosen folder (e.g. iCloud Drive): notes written
    as plain files, one per note, so files sync between Macs; local-only notes stay
    encrypted on disk. Writes are atomic (temp + rename), filename = `<uuid>.md`
-   with a versioned frontmatter block (`aside: 1`; files written before the
-   app was renamed use `edgeNotes: 1` and are still read); conflict policy =
+   with a versioned frontmatter block (`stickyDeck: 1`; files written under the
+   app's earlier names carry `aside: 1` or `edgeNotes: 1` and are still read,
+   since they live in the user's folder and outlive a rename); conflict policy =
    last-writer-wins on `updatedAt`; external changes are watched and imported.
    Deletions sync as `deletedAt` tombstones; purge removes the file.
    Locked notes are never written to the sync folder (D14).
@@ -95,13 +96,13 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
 
 ## Settings
 - Deck edge: Left or Right.
-- **Aside extension:** Animation speed (stagger modes).
-- **Aside extension:** Font choice and size (bundled faces are
+- **StickyDeck extension:** Animation speed (stagger modes).
+- **StickyDeck extension:** Font choice and size (bundled faces are
   OFL-licensed open fonts; empty setting = system rounded).
 - Show over full-screen apps (toggle).
-- Check for updates is not implemented. Aside cannot make a truthful release
+- Check for updates is not implemented. StickyDeck cannot make a truthful release
   check until there is a published release endpoint to check against.
-- No licence or subscription UI: Aside is free and open source.
+- No licence or subscription UI: StickyDeck is free and open source.
 
 ## Global shortcuts (system hotkey API, no permissions)
 - ⌥⌘N — new note
@@ -132,7 +133,7 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
   replaces a pending one; undo restores the original `sortIndex`; purge after
   10 s (D9).
 - Fast user switching is observed via `NSWorkspace.sessionDid(Resign|Become)Active`;
-  the deck hides for a resigned session. This is an Aside hardening behavior.
+  the deck hides for a resigned session. This is an StickyDeck hardening behavior.
 - Right-click pill menu: new note, all notes, archive, edge choice, show over
   full-screen apps, settings, and quit — items with icons. Check for Updates remains
   pending until the project has a public release endpoint.
@@ -142,7 +143,7 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
   nothing else", "Reach over and the deck fans out", "Open one and start typing",
   and "Finished notes step out of the way".
 - The last step defaults "Add to Login Items" on and ends with "Make my first
-  note". The wording and the miniature artwork are Aside's own.
+  note". The wording and the miniature artwork are StickyDeck's own.
 - The window is 436 pt tall: the value the layout was actually built and
   reviewed against. Treat it as intentional rather than as drift to correct.
 

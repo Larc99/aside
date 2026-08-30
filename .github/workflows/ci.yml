@@ -42,17 +42,17 @@ jobs:
       # Proves the release build, the Info.plist, the bundled fonts and the
       # sandbox entitlements all still assemble — none of which `swift build`
       # exercises.
-      - name: Build Aside.app
+      - name: Build StickyDeck.app
         run: scripts/make_app.sh
 
       - name: Verify bundle identity and signature
         run: |
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" build/Aside.app/Contents/Info.plist
-          codesign -v build/Aside.app
-          test -d build/Aside.app/Contents/Resources/Fonts
-          test -f build/Aside.app/Contents/Resources/Fonts/OFL.txt  # OFL: must ship with the fonts
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" build/StickyDeck.app/Contents/Info.plist
+          codesign -v build/StickyDeck.app
+          test -d build/StickyDeck.app/Contents/Resources/Fonts
+          test -f build/StickyDeck.app/Contents/Resources/Fonts/OFL.txt  # OFL: must ship with the fonts
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Aside.app
-          path: build/Aside.app
+          name: StickyDeck.app
+          path: build/StickyDeck.app
