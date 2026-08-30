@@ -24,8 +24,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .build
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-
+          # Scoped to the repository because .build stores absolute paths:
+          # after the rename to stickydeck the restored cache still pointed at
+          # /Users/runner/work/aside/aside and every compile failed on a stale
+          # PCH. Including the repo name makes a future rename bust it.
+          key: spm-${{ runner.os }}-${{ github.repository }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-${{ github.repository }}-
 
       - name: Build
         run: swift build
