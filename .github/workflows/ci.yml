@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+  bundle:
+    name: Assemble the app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Proves the release build, the Info.plist, the bundled fonts and the
+      # sandbox entitlements all still assemble — none of which `swift build`
+      # exercises.
+      - name: Build Aside.app
+        run: scripts/make_app.sh
+
+      - name: Verify bundle identity and signature
+        run: |
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" build/Aside.app/Contents/Info.plist
+          codesign -v build/Aside.app
+          test -d build/Aside.app/Contents/Resources/Fonts
+          test -f build/Aside.app/Contents/Resources/Fonts/OFL.txt  # OFL: must ship with the fonts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aside.app
+          path: build/Aside.app
