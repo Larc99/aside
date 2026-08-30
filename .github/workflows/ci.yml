@@ -42,6 +42,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # make_app.sh derives the version from the nearest tag and the commit
+          # count, neither of which exists in the default shallow checkout.
+          fetch-depth: 0
 
       # Proves the release build, the Info.plist, the bundled fonts and the
       # sandbox entitlements all still assemble — none of which `swift build`

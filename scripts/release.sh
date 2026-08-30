@@ -16,6 +16,21 @@ OUT_DIR="${1:-build}"
 APP="$OUT_DIR/StickyDeck.app"
 ZIP="$OUT_DIR/StickyDeck.zip"
 
+# The bundle takes its version from the nearest tag, so publishing from an
+# untagged or shallow tree would ship a build labelled 0.0.0. Refuse instead
+# of producing a release that lies about what it is.
+if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+    echo "error: shallow clone — tags and commit count are unavailable." >&2
+    echo "       run: git fetch --unshallow --tags" >&2
+    exit 1
+fi
+if ! git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+    echo "error: HEAD is not tagged. Tag the release commit first, e.g." >&2
+    echo "       git tag -a v0.3.0 -m \"StickyDeck 0.3.0\"" >&2
+    exit 1
+fi
+echo "==> Releasing $(git describe --tags --exact-match HEAD)"
+
 echo "==> Building and signing as: $STICKYDECK_SIGN_IDENTITY"
 STICKYDECK_SIGN_IDENTITY="$STICKYDECK_SIGN_IDENTITY" scripts/make_app.sh "$OUT_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP"

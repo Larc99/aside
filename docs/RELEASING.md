@@ -25,19 +25,28 @@ xcrun notarytool store-credentials stickydeck-notary \
 
 ## Cutting a release
 
+**Tag first.** The bundle reads its version from the nearest tag, so the tag
+has to exist before the build.
+
 ```bash
-# 1. Bump VERSION in scripts/make_app.sh, then:
+# 1. Tag the release commit:
 swift test
+git tag -a v0.3.0 -m "StickyDeck 0.3.0"
 
 # 2. Build, sign, notarize, staple, verify — all of it:
 export STICKYDECK_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 scripts/release.sh
 
-# 3. Tag and publish, attaching the zip:
-git tag -a v0.2.0 -m "StickyDeck 0.2.0"
-git push origin v0.2.0
-gh release create v0.2.0 --title "StickyDeck 0.2.0" --notes "..." build/StickyDeck.zip
+# 3. Publish, attaching the zip:
+git push origin main && git push origin v0.3.0
+gh release create v0.3.0 --title "StickyDeck 0.3.0" --notes "..." build/StickyDeck.zip
 ```
+
+There is no version to bump by hand. `CFBundleShortVersionString` is the tag
+without its leading `v`, and `CFBundleVersion` is the commit count, which
+increases monotonically on a linear history. `release.sh` refuses to run on an
+untagged HEAD or a shallow clone, since either would ship a build labelled
+`0.0.0`.
 
 `release.sh` ends by running `spctl --assess`, which must report
 `source=Notarized Developer ID`. That is the check that reflects what a
