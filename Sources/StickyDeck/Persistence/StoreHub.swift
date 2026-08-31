@@ -11,13 +11,26 @@ actor StoreHub: NoteStore {
         self.backing = backing
     }
 
-    /// Replaces the backing store and notifies observers. Always posts: the
-    /// contract's stores are value or actor types without reliable identity,
-    /// so callers (e.g. `SyncFolderCoordinator`) dedupe on the *setting*
-    /// instead of the instance.
-    func swap(to newBacking: any NoteStore) {
+    /// Drains work that still belongs to the outgoing library, then replaces
+    /// the backing store and notifies observers. The backing remains unchanged
+    /// while `flushPendingWork` awaits, so a debounced editor save forced by
+    /// that hook is routed to the library whose note the user was editing.
+    /// There is deliberately no suspension between the hook returning and the
+    /// assignment, which closes the final redirect window inside this actor.
+    ///
+    /// Every successful swap posts: the contract's stores are value or actor
+    /// types without reliable identity, so callers (e.g.
+    /// `SyncFolderCoordinator`) dedupe on the setting instead of the instance.
+    @discardableResult
+    func swap(
+        to newBacking: any NoteStore,
+        afterFlushing flushPendingWork: @Sendable () async -> Bool = { true }
+    ) async -> Bool {
+        guard await flushPendingWork() else { return false }
         backing = newBacking
         NotificationCenter.default.post(name: .noteStoreChanged, object: nil)
+        NotificationCenter.default.post(name: .noteStoreBackingChanged, object: nil)
+        return true
     }
 
     // MARK: - NoteStore (forwarded)
@@ -43,15 +56,29 @@ actor StoreHub: NoteStore {
         try await backing.upsert(note)
     }
 
-    func softDelete(id: UUID) async throws {
-        try await backing.softDelete(id: id)
+    func mutate(
+        id: UUID,
+        _ change: @Sendable (inout Note) -> Void
+    ) async throws -> Bool {
+        // Capture once. A backing swap may enter this actor while the store
+        // operation is suspended; the entire compound mutation must stay in
+        // the library where it began.
+        let target = backing
+        return try await target.mutate(id: id, change)
     }
 
-    func restore(id: UUID) async throws {
-        try await backing.restore(id: id)
+    func softDelete(id: UUID) async throws -> DeletionToken? {
+        let target = backing
+        return try await target.softDelete(id: id)
     }
 
-    func purge(id: UUID) async throws {
-        try await backing.purge(id: id)
+    func restore(_ token: DeletionToken) async throws -> Bool {
+        let target = backing
+        return try await target.restore(token)
+    }
+
+    func purge(_ token: DeletionToken) async throws -> Bool {
+        let target = backing
+        return try await target.purge(token)
     }
 }

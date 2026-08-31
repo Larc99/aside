@@ -1,9 +1,11 @@
 import AppKit
 import Foundation
+import Observation
 import SwiftUI
 
 @MainActor
-final class DeckViewModel: ObservableObject {
+@Observable
+final class DeckViewModel {
     enum State: Equatable {
         case pill
         case fan
@@ -19,32 +21,33 @@ final class DeckViewModel: ObservableObject {
     struct PendingDelete: Identifiable, Equatable {
         let id = UUID()
         let note: Note
+        let deletion: DeletionToken
         let expiresAt: Date
     }
 
-    @Published private(set) var deckNotes: [Note] = []
-    @Published var state: State = .pill
-    @Published private(set) var notePresentationPhase: NotePresentationPhase = .idle
-    @Published private(set) var presentedNoteID: UUID?
-    @Published var pendingDelete: PendingDelete?
-    @Published var peekedNoteID: UUID?
+    private(set) var deckNotes: [Note] = []
+    var state: State = .pill
+    private(set) var notePresentationPhase: NotePresentationPhase = .idle
+    private(set) var presentedNoteID: UUID?
+    var pendingDelete: PendingDelete?
+    var peekedNoteID: UUID?
 
     /// Mirrors `AppSettings.deckEdge` as observable state. The views used to
     /// read the static directly, so switching edge with the deck open moved
     /// the panel without ever invalidating the SwiftUI body — leaving the fan
     /// drawn against the old edge while the hit rects had already moved.
-    @Published private(set) var edge: AppSettings.Edge = AppSettings.deckEdge
+    private(set) var edge: AppSettings.Edge = AppSettings.deckEdge
 
     /// How many tabs the fan is currently rendering. On the last page of an
     /// overflowing deck this is smaller than the layout's page size, and the
     /// hit rect has to follow it or it swallows clicks in the blank strip.
-    @Published var drawnTabCount: Int = 0
+    var drawnTabCount: Int = 0
 
     /// Height of the fixed-size deck panel on the current screen. The fan
     /// fits its layout inside it (D26) — fewer/tighter tabs on short
     /// displays. DeckController keeps it in sync with the panel frame.
-    @Published private(set) var panelHeight: CGFloat = (NSScreen.main?.visibleFrame.height ?? 900) * 0.8
-    @Published var cardOffsetY: CGFloat = CGFloat(AppSettings.noteCardOffsetY)
+    private(set) var panelHeight: CGFloat = (NSScreen.main?.visibleFrame.height ?? 900) * 0.8
+    var cardOffsetY: CGFloat = CGFloat(AppSettings.noteCardOffsetY)
 
     /// Debug/screenshot mode: hover-collapse is suspended.
     var debugPinned = false
@@ -70,26 +73,53 @@ final class DeckViewModel: ObservableObject {
 
     let store: any NoteStore
 
-    private var saveTasks: [UUID: Task<Void, Never>] = [:]
-    private var collapseTask: Task<Void, Never>?
-    private var notePresentationTask: Task<Void, Never>?
-    private var peekDismissTask: Task<Void, Never>?
-    private var deleteTask: Task<Void, Never>?
-    private var observationTask: Task<Void, Never>?
-    private var settingsObservationTask: Task<Void, Never>?
+    @ObservationIgnored private var saveTasks: [UUID: Task<Void, Never>] = [:]
+    /// Pin, archive, delete, duplicate and undo are launched from synchronous
+    /// AppKit/SwiftUI actions. Keep their tasks reachable so quit and a sync
+    /// backing change cannot overtake a store mutation already requested by
+    /// the user.
+    @ObservationIgnored private var mutationTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var mutationTail: Task<Void, Never>?
+    @ObservationIgnored private var collapseTask: Task<Void, Never>?
+    @ObservationIgnored private var notePresentationTask: Task<Void, Never>?
+    @ObservationIgnored private var peekDismissTask: Task<Void, Never>?
+    @ObservationIgnored private var deleteTask: Task<Void, Never>?
+    @ObservationIgnored private var observationTask: Task<Void, Never>?
+    @ObservationIgnored private var settingsObservationTask: Task<Void, Never>?
     private var lastOwnSaveAt = Date.distantPast
     private var suppressNextStoreEcho = false
     private var cardDragOrigin: CGFloat?
     private var pausedDeleteRemaining: TimeInterval?
-    /// The most recent debounced draft, kept so the quit path can write it
-    /// even though its timer will never fire.
-    private var pendingEditorDraft: (id: UUID, title: String, body: String, tag: String?)?
+    /// Every note owns its own quit fallback, just as it owns its own debounce
+    /// task. A single global draft lets an older note's task clear a newer
+    /// note's fallback when the user switches cards quickly.
+    private struct EditorDraft {
+        let generation: UUID
+        let id: UUID
+        let title: String
+        let body: String
+        let tag: String?
+        let bodyWasEdited: Bool
+    }
+    private var pendingEditorDrafts: [UUID: EditorDraft] = [:]
     private var hoveredNoteIDs: [UUID] = []
 
     /// Installed by DeckController so pinning can hand the exact live editor
     /// frame to the sticky-window module without exposing panel geometry to
     /// the view model.
     var pinTransitionFrameProvider: (() -> CGRect?)?
+
+    /// Installed by AppDelegate. The deck does not own desktop windows, but it
+    /// is the surface a pin is initiated from, and the handoff has to be
+    /// visually atomic — so it asks directly rather than by store round trip.
+    weak var stickyPresenter: (any StickyPresenting)?
+
+    var hasPendingWork: Bool {
+        !saveTasks.isEmpty
+            || !pendingEditorDrafts.isEmpty
+            || !mutationTasks.isEmpty
+            || pendingDelete != nil
+    }
 
     init(store: any NoteStore) {
         self.store = store
@@ -135,6 +165,8 @@ final class DeckViewModel: ObservableObject {
         peekDismissTask?.cancel()
         deleteTask?.cancel()
         saveTasks.values.forEach { $0.cancel() }
+        mutationTasks.values.forEach { $0.cancel() }
+        mutationTail?.cancel()
     }
 
     // MARK: - Data
@@ -168,7 +200,13 @@ final class DeckViewModel: ObservableObject {
             collapseTask?.cancel()
             collapseTask = nil
             collapseCancellationRequest?()
-        } else if state == .fan && !debugPinned {
+        } else if state == .fan && !debugPinned && pendingDelete == nil {
+            // A pending delete puts its Undo toast inside this panel. Collapsing
+            // now orders the panel out and takes the toast, its Undo button and
+            // its ⌘Z shortcut with it, while the ten-second purge keeps running
+            // — so the delete becomes unundoable. `closeNote` has always been
+            // guarded this way; the hover path has to be too, and whatever
+            // clears the pending delete re-checks collapse afterwards.
             collapseTask?.cancel()
             collapseTask = Task { [weak self] in
                 try? await Task.sleep(
@@ -266,9 +304,20 @@ final class DeckViewModel: ObservableObject {
         // with the pointer somewhere else.
         // A pending delete puts its Undo toast inside this panel; collapsing
         // now would take the user's only undo affordance with it.
-        if pendingDelete == nil, let check = shouldCollapseCheck, check() {
-            deckHoverChanged(false)
-        }
+        collapseIfPointerOutside()
+    }
+
+    /// Collapses the deck when the pointer is no longer over any of its
+    /// content, provided nothing on the panel still needs to be reachable.
+    ///
+    /// Called both when the note closes and when a pending delete resolves:
+    /// the hover exit that would normally collapse the deck is suppressed
+    /// while the Undo toast is up, and AppKit sends no fresh exit for a
+    /// pointer that never moved — so without this the fan would sit open on
+    /// the screen edge until the user waved at it.
+    private func collapseIfPointerOutside() {
+        guard pendingDelete == nil, let check = shouldCollapseCheck, check() else { return }
+        deckHoverChanged(false)
     }
 
     func updatePanelHeight(_ height: CGFloat) {
@@ -291,57 +340,182 @@ final class DeckViewModel: ObservableObject {
 
     /// Writes out everything still in flight and commits any pending delete.
     /// Called on the quit path, where no debounce will ever fire again.
-    func flushPendingWork() async {
-        for (_, task) in saveTasks { task.cancel() }
-        saveTasks.removeAll()
-        if let draft = pendingEditorDraft {
-            await persist(id: draft.id, title: draft.title, body: draft.body, tag: draft.tag)
+    @discardableResult
+    func flushPendingWork() async -> Bool {
+        // Main-actor reentrancy allows another action to start at any await.
+        // Repeat until both queues are empty; once the final condition is read
+        // there is no suspension before returning.
+        while true {
+            await awaitMutationTasks()
+            guard await flushEditorDrafts() else { return false }
+            guard saveTasks.isEmpty,
+                  pendingEditorDrafts.isEmpty,
+                  mutationTasks.isEmpty else { continue }
+            break
         }
-        pendingEditorDraft = nil
+
         deleteTask?.cancel()
         deleteTask = nil
         if let pending = pendingDelete {
             pendingDelete = nil
             pausedDeleteRemaining = nil
-            try? await store.purge(id: pending.note.id)
+            _ = try? await store.purge(pending.deletion)
+        }
+        return true
+    }
+
+    private func flushEditorDrafts() async -> Bool {
+        let ids = Set(saveTasks.keys).union(pendingEditorDrafts.keys)
+        for id in ids {
+            guard await flushEditorDraft(id: id) else { return false }
+        }
+        return true
+    }
+
+    private func flushEditorDraft(id: UUID) async -> Bool {
+        while true {
+            let task = saveTasks.removeValue(forKey: id)
+            task?.cancel()
+            // Cancellation can arrive after a task entered store I/O. Let that
+            // snapshot settle before the newest pending generation wins.
+            await task?.value
+
+            guard let draft = pendingEditorDrafts[id] else { return true }
+            let saved = await persist(
+                id: draft.id,
+                title: draft.title,
+                body: draft.body,
+                tag: draft.tag,
+                bodyWasEdited: draft.bodyWasEdited
+            )
+            guard saved else { return false }
+            if pendingEditorDrafts[id]?.generation == draft.generation {
+                pendingEditorDrafts[id] = nil
+            }
+            guard saveTasks[id] != nil || pendingEditorDrafts[id] != nil else { return true }
+        }
+    }
+
+    @discardableResult
+    private func launchMutation(
+        _ operation: @escaping @MainActor () async -> Void
+    ) -> Task<Void, Never> {
+        let id = UUID()
+        let prior = mutationTail
+        let task = Task { [weak self] in
+            await prior?.value
+            await operation()
+            self?.mutationTasks[id] = nil
+        }
+        mutationTasks[id] = task
+        mutationTail = task
+        return task
+    }
+
+    private func awaitMutationTasks() async {
+        while !mutationTasks.isEmpty {
+            let tasks = mutationTasks
+            for (id, task) in tasks {
+                await task.value
+                mutationTasks[id] = nil
+            }
         }
     }
 
     // MARK: - Note actions
 
     func newNote() async {
-        let minSort = deckNotes.map(\.sortIndex).min() ?? 1
-        let note = Note(sortIndex: minSort - 1)
-        try? await store.upsert(note)
-        await reload()
-        clearPeek()
-        select(note.id)
+        let task = launchMutation { [weak self] in
+            guard let self else { return }
+            let minSort = self.deckNotes.map(\.sortIndex).min() ?? 1
+            // Sync files and .stickies archives are user-editable. Saturate an
+            // extreme imported value instead of trapping on integer overflow.
+            let sortIndex = minSort == .min ? Int.min : minSort - 1
+            let note = Note(sortIndex: sortIndex)
+            do {
+                try await self.store.upsert(note)
+            } catch {
+                // A silent no-op left the "+" looking broken. The deck has no
+                // alert surface of its own, so this matches every other write
+                // failure here and leaves a trail.
+                NSLog("StickyDeck could not create the note: %@", error.localizedDescription)
+                return
+            }
+            await self.reload()
+            self.clearPeek()
+            self.select(note.id)
+        }
+        await task.value
     }
 
     func duplicate(_ id: UUID) {
-        guard let source = deckNotes.first(where: { $0.id == id }) else { return }
-        var copy = source
-        copy.id = UUID()
-        copy.pinned = false
-        copy.sortIndex = source.sortIndex + 1
-        copy.createdAt = Date()
-        copy.updatedAt = copy.createdAt
-        copy.archivedAt = nil
-        copy.deletedAt = nil
-        Task {
-            try? await store.upsert(copy)
-            await reload()
+        guard deckNotes.contains(where: { $0.id == id }) else { return }
+        launchMutation { [weak self] in
+            guard let self,
+                  await self.flushEditorDraft(id: id),
+                  let source = self.deckNotes.first(where: { $0.id == id }) else { return }
+            var copy = source
+            copy.id = UUID()
+            copy.pinned = false
+            copy.sortIndex = source.sortIndex == .max ? Int.max : source.sortIndex + 1
+            copy.createdAt = Date()
+            copy.updatedAt = copy.createdAt
+            copy.archivedAt = nil
+            copy.deletedAt = nil
+            do {
+                try await self.store.upsert(copy)
+            } catch {
+                NSLog("StickyDeck could not duplicate the note: %@", error.localizedDescription)
+                return
+            }
+            await self.reload()
         }
     }
 
-    func saveDraft(id: UUID, title: String, body: String, tag: String? = nil) {
-        pendingEditorDraft = (id: id, title: title, body: body, tag: tag)
-        saveTasks[id]?.cancel()
+    func saveDraft(
+        id: UUID,
+        title: String,
+        body: String,
+        tag: String? = nil,
+        bodyWasEdited: Bool = false
+    ) {
+        // Title and body changes can arrive as separate SwiftUI callbacks in
+        // the same update. Once the body changed, keep that fact on the
+        // coalesced draft even if a later title callback replaces its timer.
+        let effectiveBodyWasEdited = bodyWasEdited
+            || pendingEditorDrafts[id]?.bodyWasEdited == true
+        let draft = EditorDraft(
+            generation: UUID(),
+            id: id,
+            title: title,
+            body: body,
+            tag: tag,
+            bodyWasEdited: effectiveBodyWasEdited
+        )
+        pendingEditorDrafts[id] = draft
+        let prior = saveTasks[id]
+        prior?.cancel()
         saveTasks[id] = Task { [weak self] in
+            // A cancelled task may already be inside store I/O. Keep it in the
+            // chain so quit or a state action can wait for the older snapshot
+            // before making this newest draft authoritative.
+            await prior?.value
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled, let self else { return }
-            await self.persist(id: id, title: title, body: body, tag: tag)
-            self.pendingEditorDraft = nil
+            let saved = await self.persist(
+                id: id,
+                title: title,
+                body: body,
+                tag: tag,
+                bodyWasEdited: effectiveBodyWasEdited
+            )
+            // A cancelled task may already be inside store I/O. It must never
+            // clear a draft that superseded it while that await was in flight.
+            guard self.pendingEditorDrafts[id]?.generation == draft.generation else { return }
+            self.saveTasks[id] = nil
+            if saved {
+                self.pendingEditorDrafts[id] = nil
+            }
         }
     }
 
@@ -350,23 +524,43 @@ final class DeckViewModel: ObservableObject {
     /// reload it out of that array, so the debounced save that lands afterwards
     /// finds nothing and silently drops the last few hundred milliseconds of
     /// typing.
-    func flushDraft(id: UUID, title: String, body: String, tag: String? = nil) async {
-        saveTasks[id]?.cancel()
-        saveTasks[id] = nil
-        await persist(id: id, title: title, body: body, tag: tag)
+    func flushDraft(id: UUID, title: String, body: String, tag: String? = nil) async -> Bool {
+        let bodyWasEdited = pendingEditorDrafts[id]?.bodyWasEdited == true
+        saveDraft(
+            id: id,
+            title: title,
+            body: body,
+            tag: tag,
+            bodyWasEdited: bodyWasEdited
+        )
+        return await flushEditorDraft(id: id)
     }
 
-    private func persist(id: UUID, title: String, body: String, tag: String? = nil) async {
-        guard let current = deckNotes.first(where: { $0.id == id }) else { return }
+    private func persist(
+        id: UUID,
+        title: String,
+        body: String,
+        tag: String? = nil,
+        bodyWasEdited: Bool = false
+    ) async -> Bool {
+        guard let current = deckNotes.first(where: { $0.id == id }) else { return true }
         var draft = current
         draft.title = title
         draft.body = body
+        if bodyWasEdited {
+            // The migration marker describes an untouched placeholder, not an
+            // empty value. Real input owns the body even when the user types
+            // and then clears it back to empty.
+            draft.bodyNeedsMigration = false
+        }
         if let tag {
             draft.tag = tag
         }
-        guard draft.title != current.title
+        let replacesMigrationPlaceholder = bodyWasEdited && current.bodyNeedsMigration
+        guard replacesMigrationPlaceholder
+                || draft.title != current.title
                 || draft.body != current.body
-                || draft.tag != current.tag else { return }
+                || draft.tag != current.tag else { return true }
 
         lastOwnSaveAt = Date()
         suppressNextStoreEcho = true
@@ -381,7 +575,7 @@ final class DeckViewModel: ObservableObject {
                 // Notes — and the deck kept rendering a note that was gone.
                 suppressNextStoreEcho = false
                 await reload()
-                return
+                return true
             }
         } catch {
             // No write, no echo — don't suppress the next real event.
@@ -390,8 +584,10 @@ final class DeckViewModel: ObservableObject {
                 // Another Mac holds a newer copy. Show it rather than leaving
                 // the editor claiming this text was saved.
                 await reload()
+                return true
             }
-            return
+            NSLog("StickyDeck could not save the note: %@", error.localizedDescription)
+            return false
         }
         // Surgical in-place update: replacing the whole array (full reload)
         // re-rendered the open editor after every autosave pause and could
@@ -400,12 +596,17 @@ final class DeckViewModel: ObservableObject {
             draft.updatedAt = Date()
             deckNotes[idx] = draft
         }
+        return true
     }
 
     func cycleColor(of id: UUID) {
-        guard let note = deckNotes.first(where: { $0.id == id }) else { return }
-        let next = NoteColor.at(note.colorIndex).next.rawValue
-        applyStateChange(to: id) { $0.colorIndex = next }
+        guard deckNotes.contains(where: { $0.id == id }) else { return }
+        // Derive from the store's live copy inside the atomic mutation. Two
+        // rapid keyboard commands should advance twice instead of both
+        // writing the same next colour computed from a stale UI snapshot.
+        applyStateChange(to: id) {
+            $0.colorIndex = NoteColor.at($0.colorIndex).next.rawValue
+        }
     }
 
     func setColor(_ colorIndex: Int, of id: UUID) {
@@ -417,32 +618,71 @@ final class DeckViewModel: ObservableObject {
     /// deck's snapshot always carried `deletedAt: nil` (fetch hides
     /// tombstones), so recolouring or pinning a note that had just been
     /// deleted elsewhere brought it back from the dead.
-    private func applyStateChange(to id: UUID, _ change: @escaping (inout Note) -> Void) {
-        let draft = deckNotes.first(where: { $0.id == id })
-        Task {
+    private func applyStateChange(
+        to id: UUID,
+        _ change: @escaping @Sendable (inout Note) -> Void
+    ) {
+        launchMutation { [weak self] in
+            guard let self, await self.flushEditorDraft(id: id) else { return }
+            let draft = self.deckNotes.first(where: { $0.id == id })
             do {
                 try await NoteContentWriter.applyStateChange(
-                    to: id, from: draft, in: store, change
+                    to: id, from: draft, in: self.store, change
                 )
             } catch {
                 NSLog("StickyDeck could not update the note: %@", error.localizedDescription)
             }
-            await reload()
+            await self.reload()
         }
     }
 
+    /// Moves a note from the deck to the desktop.
+    ///
+    /// Both halves happen in this turn: the window goes up over the card's own
+    /// frame, and the card is retired underneath it. Only the write that
+    /// records the pin is asynchronous, and nothing on screen waits for it.
     func togglePin(of id: UUID) {
         guard let note = deckNotes.first(where: { $0.id == id }) else { return }
-        if !note.pinned,
-           case .expanded(let expandedID) = state,
-           expandedID == id,
-           let frame = pinTransitionFrameProvider?() {
-            PinnedNotePlacementHints.record(frame, for: id)
+        // `deckNotes` never contains a pinned note, so this is always a pin.
+        // Unpinning is the sticky window's own affordance.
+        var pinned = note
+        // A debounced editor draft for this note has not reached the store
+        // yet, and the pin paths that go through the tab (context menu,
+        // accessibility action) cannot flush it first — the flush helper on
+        // the expanded card only ever flushes the card's own note. Hand the
+        // sticky the draft the user is looking at: otherwise the window opens
+        // on stale text and its own save writes that text back over the
+        // newer copy `applyStateChange` is about to flush.
+        if let draft = pendingEditorDrafts[id] {
+            pinned.title = draft.title
+            if !note.bodyNeedsMigration || !draft.body.isEmpty {
+                pinned.body = draft.body
+                if draft.bodyWasEdited { pinned.bodyNeedsMigration = false }
+            }
+            if let tag = draft.tag { pinned.tag = tag }
         }
-        applyStateChange(to: id) { $0.pinned.toggle() }
-        if case .expanded(let expandedID) = state, expandedID == id {
-            closeNote()
-        }
+        pinned.pinned = true
+        stickyPresenter?.present(pinned, takingPlaceOf: pinTransitionFrameProvider?())
+        retireCard(id: id)
+        applyStateChange(to: id) { $0.pinned = true }
+    }
+
+    /// Retires the expanded card under the window that has just taken its place.
+    ///
+    /// The card is not animated away, it stops existing: the editor layer
+    /// renders `presentedNote`, which is looked up in `deckNotes`, so dropping
+    /// the note there removes the card outright. Letting it animate instead
+    /// slid a now-stale card out from behind the new window — and suppressing
+    /// that with a `disablesAnimations` transaction went too far the other
+    /// way, freezing the *fan* as well so its tabs snapped into their new
+    /// positions in a single frame. The fan closing its gap is the one part of
+    /// this the user should see, so it is left to animate normally.
+    private func retireCard(id: UUID) {
+        guard case .expanded(let expandedID) = state, expandedID == id else { return }
+        notePresentationTask?.cancel()
+        notePresentationPhase = .idle
+        deckNotes.removeAll { $0.id == id }
+        state = .fan
     }
 
     /// Archive from the deck's right-click menu: the note leaves the
@@ -457,25 +697,68 @@ final class DeckViewModel: ObservableObject {
 
     func deleteWithUndo(_ id: UUID) {
         guard let note = deckNotes.first(where: { $0.id == id }) else { return }
-        // A newer delete replaces a pending one (D9), but the outgoing note
-        // still has to be purged — cancelling its timer and dropping it left
-        // an invisible soft-deleted row behind forever.
-        deleteExpired()
-        let pending = PendingDelete(note: note, expiresAt: Date().addingTimeInterval(10))
-        Task {
-            try? await store.softDelete(id: id)
-            await reload()
+        beginDeleteWithUndo(note)
+    }
+
+    /// Pinned notes are intentionally absent from `deckNotes`, but their
+    /// editor still uses the same ten-second delete contract. Revealing the
+    /// fan makes the shared Undo toast reachable after the sticky disappears.
+    func deletePinnedWithUndo(_ note: Note) {
+        clearPeek()
+        state = .fan
+        beginDeleteWithUndo(note)
+    }
+
+    private func beginDeleteWithUndo(_ note: Note) {
+        launchMutation { [weak self] in
+            guard let self, await self.flushEditorDraft(id: note.id) else { return }
+            let deletion: DeletionToken
+            do {
+                guard let token = try await self.store.softDelete(id: note.id) else {
+                    // A stale surface can still present a note that another
+                    // window has already deleted. It owns no Undo generation.
+                    await self.reload()
+                    return
+                }
+                deletion = token
+            } catch {
+                NSLog("StickyDeck could not delete the note: %@", error.localizedDescription)
+                return
+            }
+
+            // Publish an Undo token only after the tombstone exists. Otherwise
+            // its timer (or a second delete) could purge a still-active note if
+            // the preceding content save/soft-delete failed.
+            if let outgoing = self.pendingDelete {
+                self.deleteTask?.cancel()
+                self.deleteTask = nil
+                self.pendingDelete = nil
+                self.pausedDeleteRemaining = nil
+                do {
+                    try await self.store.purge(outgoing.deletion)
+                } catch {
+                    NSLog("StickyDeck could not remove the prior deleted note: %@", error.localizedDescription)
+                }
+            }
+
+            let pending = PendingDelete(
+                note: note,
+                deletion: deletion,
+                expiresAt: Date().addingTimeInterval(10)
+            )
+            self.pendingDelete = pending
+            self.pausedDeleteRemaining = nil
+            await self.reload()
+            if case .expanded(let expandedID) = self.state, expandedID == note.id {
+                self.closeNote()
+            }
+            self.scheduleExpiry(for: pending)
+            self.announce(
+                note.title.isEmpty
+                    ? "Deleted a note. Undo is available."
+                    : "Deleted \(note.title). Undo is available."
+            )
         }
-        pendingDelete = pending
-        if case .expanded(let expandedID) = state, expandedID == id {
-            closeNote()
-        }
-        scheduleExpiry(for: pending)
-        announce(
-            pending.note.title.isEmpty
-                ? "Deleted a note. Undo is available."
-                : "Deleted \(pending.note.title). Undo is available."
-        )
     }
 
     private func scheduleExpiry(for pending: PendingDelete) {
@@ -505,18 +788,20 @@ final class DeckViewModel: ObservableObject {
         deleteTask?.cancel()
         pausedDeleteRemaining = nil
         pendingDelete = nil
-        Task {
+        launchMutation { [weak self] in
+            guard let self else { return }
             do {
                 // `restore` clears the tombstone in place. Re-upserting the
                 // pre-delete snapshot carries its older `updatedAt`, which
                 // loses the sync store's last-writer-wins comparison against
                 // the tombstone — so undo silently did nothing there.
-                try await store.restore(id: pending.note.id)
+                try await self.store.restore(pending.deletion)
             } catch {
                 NSLog("StickyDeck could not undo the delete: %@", error.localizedDescription)
             }
-            await reload()
+            await self.reload()
         }
+        collapseIfPointerOutside()
     }
 
     /// Pauses the ten-second window while the toast is hovered or
@@ -531,7 +816,11 @@ final class DeckViewModel: ObservableObject {
     func resumePendingDeleteExpiry() {
         guard let pending = pendingDelete, let remaining = pausedDeleteRemaining else { return }
         pausedDeleteRemaining = nil
-        let resumed = PendingDelete(note: pending.note, expiresAt: Date().addingTimeInterval(remaining))
+        let resumed = PendingDelete(
+            note: pending.note,
+            deletion: pending.deletion,
+            expiresAt: Date().addingTimeInterval(remaining)
+        )
         pendingDelete = resumed
         scheduleExpiry(for: resumed)
     }
@@ -540,8 +829,18 @@ final class DeckViewModel: ObservableObject {
         guard let pending = pendingDelete else { return }
         pausedDeleteRemaining = nil
         pendingDelete = nil
-        Task {
-            try? await store.purge(id: pending.note.id)
+        launchMutation { [weak self] in
+            do {
+                _ = try await self?.store.purge(pending.deletion)
+            } catch {
+                // The tombstone stays behind — invisible in every surface but
+                // still owning its row/file, with nothing that ever sweeps it
+                // up. Silence made that indistinguishable from a clean purge.
+                NSLog("StickyDeck could not remove the deleted note: %@", error.localizedDescription)
+            }
         }
+        // The toast is gone, so the hover exit that was suppressed while it
+        // was up can finally take effect.
+        collapseIfPointerOutside()
     }
 }

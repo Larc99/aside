@@ -110,57 +110,105 @@ actor SyncNoteStore: NoteStore {
         absorbSnapshot()
     }
 
-    func softDelete(id: UUID) async throws {
-        try await stampInPlace(id: id) { $0.deletedAt = Date() }
-    }
-
-    func restore(id: UUID) async throws {
-        try await stampInPlace(id: id) { $0.deletedAt = nil }
-    }
-
-    func purge(id: UUID) async throws {
-        // An unreadable folder is not an empty one: without this, purging a
-        // note on an unmounted volume "succeeded" and left the file behind.
-        try Self.requireReadableFolder(folder)
-        let url = Self.fileURL(for: id, folder: folder)
-        switch Self.shape(at: url) {
-        case .none:
-            // Already gone — that is the desired end state, and nothing
-            // changed, so observers have nothing to hear about.
-            return
-        case .regularFile:
-            try FileManager.default.removeItem(at: url)
-        case .other:
-            // `removeItem` deletes a directory *recursively*, so a stray
-            // `<uuid>.md` folder would take everything under it with it.
-            throw SyncStoreError.unexpectedFileShape(url)
-        }
-        absorbSnapshot()
-    }
-
-    /// Shared body of `softDelete`/`restore`: re-reads the stored copy, lets
-    /// `mutate` change the state fields, and re-stamps `updatedAt`.
-    ///
-    /// These used to skip every guard `upsert` applies, which meant a
-    /// vanished folder made them silent no-ops and an unparseable file was
-    /// treated as an absent one. The policy is now uniform across all three
-    /// writers.
-    private func stampInPlace(id: UUID, _ mutate: (inout Note) -> Void) async throws {
+    func mutate(
+        id: UUID,
+        _ change: @Sendable (inout Note) -> Void
+    ) async throws -> Bool {
         try Self.requireReadableFolder(folder)
         let url = Self.fileURL(for: id, folder: folder)
         switch Self.readStored(at: url) {
         case .missing:
-            // Nothing to tombstone or revive; the note is genuinely not here.
-            return
+            return false
         case .unexpectedShape:
             throw SyncStoreError.unexpectedFileShape(url)
         case .unreadable:
             throw NoteStoreError.staleWrite
         case .note(var note):
-            mutate(&note)
-            note.updatedAt = Self.stamp(after: note.updatedAt)
+            guard note.deletedAt == nil else { return false }
+
+            let original = note
+            change(&note)
+
+            // Identity, creation time and deletion state belong to the store;
+            // callers of this live-note API cannot move or resurrect a file.
+            // The timestamp also belongs to the store so every accepted
+            // mutation outranks the exact copy it read.
+            note.id = original.id
+            note.createdAt = original.createdAt
+            note.deletedAt = original.deletedAt
+            note.updatedAt = original.updatedAt
+            guard note != original else { return false }
+            note.updatedAt = Self.stamp(after: original.updatedAt)
+
             try Self.write(note, to: url)
             absorbSnapshot()
+            return true
+        }
+    }
+
+    func softDelete(id: UUID) async throws -> DeletionToken? {
+        try Self.requireReadableFolder(folder)
+        let url = Self.fileURL(for: id, folder: folder)
+        switch Self.readStored(at: url) {
+        case .missing:
+            return nil
+        case .unexpectedShape:
+            throw SyncStoreError.unexpectedFileShape(url)
+        case .unreadable:
+            throw NoteStoreError.staleWrite
+        case .note(var note):
+            guard note.deletedAt == nil else { return nil }
+            // The token must be byte-for-byte equal to the timestamp a later
+            // read parses from Markdown. The codec stores milliseconds, while
+            // Date() carries finer precision, so canonicalize before returning.
+            let deletedAt = try Self.canonicalStamp(after: note.updatedAt)
+            note.deletedAt = deletedAt
+            note.updatedAt = deletedAt
+            try Self.write(note, to: url)
+            absorbSnapshot()
+            return DeletionToken(noteID: id, deletedAt: deletedAt)
+        }
+    }
+
+    func restore(_ token: DeletionToken) async throws -> Bool {
+        try Self.requireReadableFolder(folder)
+        let url = Self.fileURL(for: token.noteID, folder: folder)
+        switch Self.readStored(at: url) {
+        case .missing:
+            return false
+        case .unexpectedShape:
+            throw SyncStoreError.unexpectedFileShape(url)
+        case .unreadable:
+            throw NoteStoreError.staleWrite
+        case .note(var note):
+            guard Self.sameWireTimestamp(note.deletedAt, token.deletedAt) else { return false }
+            note.deletedAt = nil
+            note.updatedAt = try Self.canonicalStamp(after: note.updatedAt)
+            try Self.write(note, to: url)
+            absorbSnapshot()
+            return true
+        }
+    }
+
+    func purge(_ token: DeletionToken) async throws -> Bool {
+        // An unreadable folder is not an empty one: without this, purging a
+        // note on an unmounted volume "succeeded" and left the file behind.
+        try Self.requireReadableFolder(folder)
+        let url = Self.fileURL(for: token.noteID, folder: folder)
+        switch Self.readStored(at: url) {
+        case .missing:
+            return false
+        case .unexpectedShape:
+            // `removeItem` deletes a directory *recursively*, so a stray
+            // `<uuid>.md` folder must never be handed to it.
+            throw SyncStoreError.unexpectedFileShape(url)
+        case .unreadable:
+            throw NoteStoreError.staleWrite
+        case .note(let note):
+            guard Self.sameWireTimestamp(note.deletedAt, token.deletedAt) else { return false }
+            try FileManager.default.removeItem(at: url)
+            absorbSnapshot()
+            return true
         }
     }
 
@@ -332,11 +380,10 @@ actor SyncNoteStore: NoteStore {
     // key has to keep loading. New writes always use the current key.
     private static let legacyFormatKeys = ["aside", "edgeNotes"]
 
-    private static let dateFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
+    /// Value-typed and `Sendable`, unlike `ISO8601DateFormatter`: multiple
+    /// sync-store actors can serialize concurrently without sharing a mutable
+    /// formatter. Fractional seconds preserve the version-1 wire format.
+    private static let dateFormat = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
 
     private static func fileURL(for id: UUID, folder: URL) -> URL {
         folder.appendingPathComponent("\(id.uuidString).\(fileExtension)")
@@ -355,9 +402,9 @@ actor SyncNoteStore: NoteStore {
         var notes: [Note] = []
         for name in names where name.hasSuffix(".\(fileExtension)") {
             let stem = String(name.dropLast(fileExtension.count + 1))
-            guard UUID(uuidString: stem) != nil,
+            guard let fileID = UUID(uuidString: stem),
                   let data = try? Data(contentsOf: folder.appendingPathComponent(name)),
-                  let note = parse(data) else { continue }
+                  let note = parse(data, expectedID: fileID) else { continue }
             notes.append(note)
         }
         return notes
@@ -386,7 +433,10 @@ actor SyncNoteStore: NoteStore {
         case .none: return .missing
         case .other: return .unexpectedShape
         case .regularFile:
-            guard let data = try? Data(contentsOf: url), let note = parse(data) else {
+            let stem = url.deletingPathExtension().lastPathComponent
+            guard let fileID = UUID(uuidString: stem),
+                  let data = try? Data(contentsOf: url),
+                  let note = parse(data, expectedID: fileID) else {
                 return .unreadable
             }
             return .note(note)
@@ -454,10 +504,32 @@ actor SyncNoteStore: NoteStore {
     /// The stamp for a write that deliberately replaces `previous`. Normally
     /// just now — but when `previous` is a future timestamp we chose to
     /// override, stamping an older time would let the same file win again on
-    /// the next comparison, here and on every other Mac. Nudging past it
-    /// keeps "this is the newer intent" true everywhere.
+    /// the next comparison, here and on every other Mac. The version-1 wire
+    /// format stores milliseconds; three milliseconds leaves a full tick on
+    /// either side of Foundation's floating-point conversion boundary, so a
+    /// serialize/parse round trip remains strictly newer than `previous`.
     nonisolated private static func stamp(after previous: Date) -> Date {
-        max(Date(), previous.addingTimeInterval(0.001))
+        max(Date(), previous.addingTimeInterval(0.003))
+    }
+
+    /// Returns exactly the millisecond-precision value written by `serialize`.
+    /// Returning the raw higher-precision Date would make a valid token fail its
+    /// equality check as soon as the file was read back from disk.
+    nonisolated private static func canonicalStamp(after previous: Date) throws -> Date {
+        let candidate = stamp(after: previous)
+        // Propagate the theoretically impossible parse failure rather than
+        // returning the higher-precision candidate: that fallback would create
+        // a token that can never equal the timestamp read back from the file.
+        return try dateFormat.parse(candidate.formatted(dateFormat))
+    }
+
+    /// `Date` is a floating-point instant. Foundation can produce values that
+    /// differ below a millisecond when independently parsing the same ISO-8601
+    /// text, so bitwise Date equality is stricter than this file format. The
+    /// encoded value is the deletion generation's source of truth.
+    nonisolated private static func sameWireTimestamp(_ stored: Date?, _ token: Date) -> Bool {
+        guard let stored else { return false }
+        return stored.formatted(dateFormat) == token.formatted(dateFormat)
     }
 
     /// Internal (not private) so the test target can stage files in the
@@ -471,8 +543,8 @@ actor SyncNoteStore: NoteStore {
         lines.append("tag: \(quote(note.tag))")
         lines.append("pinned: \(note.pinned ? "true" : "false")")
         lines.append("sortIndex: \(note.sortIndex)")
-        lines.append("createdAt: \(quote(dateFormatter.string(from: note.createdAt)))")
-        lines.append("updatedAt: \(quote(dateFormatter.string(from: note.updatedAt)))")
+        lines.append("createdAt: \(quote(note.createdAt.formatted(dateFormat)))")
+        lines.append("updatedAt: \(quote(note.updatedAt.formatted(dateFormat)))")
         lines.append("archivedAt: \(optionalDate(note.archivedAt))")
         lines.append("deletedAt: \(optionalDate(note.deletedAt))")
         lines.append("---")
@@ -480,7 +552,7 @@ actor SyncNoteStore: NoteStore {
         return Data(text.utf8)
     }
 
-    nonisolated private static func parse(_ data: Data) -> Note? {
+    nonisolated private static func parse(_ data: Data, expectedID: UUID) -> Note? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         // Normalise CRLF first: an editor on the other end of the sync folder
         // that saves Windows line endings turns the fence into "---\r", and
@@ -500,8 +572,8 @@ actor SyncNoteStore: NoteStore {
         var tag = ""
         var pinned = false
         var sortIndex = 0
-        var createdAt = Date()
-        var updatedAt = Date()
+        var createdAt: Date?
+        var updatedAt: Date?
         var archivedAt: Date?
         var deletedAt: Date?
         var sawFormat = false
@@ -520,15 +592,15 @@ actor SyncNoteStore: NoteStore {
             case "tag": tag = unquote(value)
             case "pinned": pinned = value == "true"
             case "sortIndex": sortIndex = Int(value) ?? 0
-            case "createdAt": createdAt = date(value) ?? Date()
-            case "updatedAt": updatedAt = date(value) ?? Date()
+            case "createdAt": createdAt = date(value)
+            case "updatedAt": updatedAt = date(value)
             case "archivedAt": archivedAt = optionalDate(value)
             case "deletedAt": deletedAt = optionalDate(value)
             default: break
             }
         }
 
-        guard sawFormat, let id else { return nil }
+        guard sawFormat, let id, id == expectedID, let createdAt else { return nil }
         return Note(
             id: id,
             title: title,
@@ -538,7 +610,11 @@ actor SyncNoteStore: NoteStore {
             pinned: pinned,
             sortIndex: sortIndex,
             createdAt: createdAt,
-            updatedAt: updatedAt,
+            // A malformed `updatedAt` used to become `Date()` on every read,
+            // making the stored copy perpetually newer than an edit trying to
+            // replace it. `createdAt` is stable and lets the next valid write
+            // heal the damaged metadata without inventing a moving timestamp.
+            updatedAt: updatedAt ?? createdAt,
             archivedAt: archivedAt,
             deletedAt: deletedAt
         )
@@ -579,7 +655,7 @@ actor SyncNoteStore: NoteStore {
 
     nonisolated private static func optionalDate(_ date: Date?) -> String {
         guard let date else { return "null" }
-        return quote(dateFormatter.string(from: date))
+        return quote(date.formatted(dateFormat))
     }
 
     nonisolated private static func optionalDate(_ value: String) -> Date? {
@@ -587,7 +663,7 @@ actor SyncNoteStore: NoteStore {
     }
 
     nonisolated private static func date(_ value: String) -> Date? {
-        dateFormatter.date(from: unquote(value))
+        try? dateFormat.parse(unquote(value))
     }
 
     // MARK: - Query semantics (mirrors LocalNoteStore)

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Owns the Settings window. Lazily creates the window on the first
@@ -8,24 +9,13 @@ import SwiftUI
 @MainActor
 final class SettingsWindowController {
     private var window: NSWindow?
-    private var observer: NSObjectProtocol?
+    private var observer: AnyCancellable?
 
     init() {
-        observer = NotificationCenter.default.addObserver(
-            forName: .openSettingsRequested,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.showSettings()
-            }
-        }
-    }
-
-    deinit {
-        if let observer {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        observer = NotificationCenter.default
+            .publisher(for: .openSettingsRequested)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.showSettings() }
     }
 
     private func showSettings() {

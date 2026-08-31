@@ -1,5 +1,4 @@
 import AppKit
-import CryptoKit
 
 @main
 struct StickyDeckApp {
@@ -20,15 +19,15 @@ struct StickyDeckApp {
 final class AppEnvironment {
     let hub: StoreHub
     let localStore: LocalNoteStore
-    let key: SymmetricKey
+    let database: AppDatabase
 
     /// The active store; a `StoreHub` so the backing store (local SQLite ⇄
     /// sync folder) can swap under every observer without rebuilding them.
     var store: any NoteStore { hub }
 
     init() throws {
-        key = try KeyStore.noteBodyKey()
-        localStore = LocalNoteStore(database: try AppDatabase.open(), key: key)
+        database = try AppDatabase.open()
+        localStore = LocalNoteStore(database: database)
         hub = StoreHub(backing: localStore)
     }
 }
@@ -45,16 +44,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var syncFolderCoordinator: SyncFolderCoordinator?
     private let hotKeyCenter = HotKeyCenter()
     private var isFlushingForTermination = false
+    private var interactionBlockCount = 0
+    private var blockedWindows: [(window: NSWindow, ignoredMouseEvents: Bool)] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        // Every surface in this app is drawn on the light paper ground
-        // (#F5F4ED) with black-on-light text, and the note colours are fixed
-        // pastels. Letting the chrome follow a dark system appearance put a
-        // dark sidebar behind that palette and made All Notes unreadable.
-        // Pinning the appearance keeps the app self-consistent; a real dark
-        // theme would mean redesigning the palette.
-        NSApp.appearance = NSAppearance(named: .aqua)
+        // The app no longer pins a light appearance. The split is by surface,
+        // not app-wide: anything that *is* a sheet of pastel note paper — the
+        // deck, the pill, pinned stickies, the onboarding splash — pins itself
+        // to Aqua, because black-on-pastel has to stay black in either theme.
+        // The windows the user actually lives in (All Notes, Archive,
+        // Settings) follow the system, so their chrome is dark on a dark Mac.
+        //
+        // A visual regression run has to capture both appearances without
+        // changing the machine's system setting, so it can force one here.
+        // The note-paper panels pin themselves and are unaffected, which is
+        // exactly the split being captured.
+        if let forced = ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_APPEARANCE"] {
+            NSApp.appearance = NSAppearance(named: forced == "dark" ? .darkAqua : .aqua)
+        }
 
         do {
             environment = try AppEnvironment()
@@ -66,10 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let alert = NSAlert()
             alert.alertStyle = .critical
             alert.messageText = "StickyDeck could not open its note store"
-            // The store errors that reach here are actionable (a locked
-            // keychain, above all), so show the localized text rather than
-            // the raw case. Quitting is the only safe outcome: continuing
-            // would mean running without the key that reads note bodies.
+            // Only real filesystem trouble reaches here now — an unwritable
+            // container, a corrupt database. Quitting is the only safe
+            // outcome: there is nowhere to put what the user types.
             alert.informativeText = error.localizedDescription
             alert.addButton(withTitle: "Quit")
             alert.runModal()
@@ -78,6 +85,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let environment else { return }
+
+        // Background one-shot: rescue bodies still stored encrypted by 0.2.0
+        // and earlier. Isolated visual-QA databases must never touch the
+        // user's keychain (their temporary signatures would trigger an ACL
+        // permission prompt).
+        if ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_DATA_DIR"] == nil {
+            let database = environment.database
+            Task.detached(priority: .utility) {
+                await LegacyEncryptedBodies.migrate(in: database)
+            }
+        }
+
+        // Resolve the saved backing before any surface loads notes. Otherwise
+        // a sync-folder user briefly sees the independent local library, and
+        // can even start an edit there, while the asynchronous swap lands.
+        // Visual QA deliberately stays on its isolated local database.
+        guard ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_DISABLE_SYNC"] != "1" else {
+            installUserInterface(using: environment)
+            return
+        }
+        let coordinator = SyncFolderCoordinator(
+            hub: environment.hub,
+            localStore: environment.localStore,
+            flushPendingWork: { @MainActor [weak self] in
+                guard let self else { return true }
+                let saved = await self.flushAllPendingWork()
+                if !saved {
+                    self.presentPendingWorkError(
+                        message: "StickyDeck kept the current notes location. Check that it is available, then try changing the sync folder again."
+                    )
+                }
+                return saved
+            },
+            setInteractionBlocked: { @MainActor [weak self] blocked in
+                self?.setPersistenceInteractionBlocked(blocked)
+            },
+            reloadActiveLibrary: { @MainActor [weak self] in
+                await self?.reloadActiveLibrary()
+            }
+        )
+        syncFolderCoordinator = coordinator
+        Task { [weak self] in
+            await coordinator.install()
+            self?.installUserInterface(using: environment)
+        }
+    }
+
+    private func installUserInterface(using environment: AppEnvironment) {
+        guard deckController == nil else { return }
 
         let viewModel = DeckViewModel(store: environment.store)
         let controller = DeckController(viewModel: viewModel)
@@ -88,9 +144,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowController = SettingsWindowController()
         windowCoordinator = WindowCoordinator(store: environment.store)
 
-        let stickyManager = StickyWindowManager(store: environment.store)
+        let stickyManager = StickyWindowManager(
+            store: environment.store,
+            onDeleteWithUndo: { [weak viewModel] note in
+                viewModel?.deletePinnedWithUndo(note)
+            }
+        )
         stickyManager.install()
         stickyWindowManager = stickyManager
+        // Pinning hands a card straight to the desktop; the store write that
+        // records it follows rather than driving it.
+        viewModel.stickyPresenter = stickyManager
 
         let onboarding = OnboardingController(
             store: environment.store,
@@ -98,32 +162,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { await viewModel.newNote() }
             }
         )
-        onboarding.install()
         onboardingController = onboarding
-
-        // Visual QA uses a disposable local database and must not inherit a
-        // real sync-folder bookmark from UserDefaults.
-        if ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_DISABLE_SYNC"] != "1" {
-            let coordinator = SyncFolderCoordinator(hub: environment.hub, localStore: environment.localStore)
-            coordinator.install()
-            syncFolderCoordinator = coordinator
-        }
+        onboarding.install()
 
         HotKeyCenter.registerStandard(into: hotKeyCenter) { [weak self] id in
             self?.handleHotKey(id)
         }
 
         installStandardEditMenu()
-
-        // Background one-shot: re-encrypt any rows written under a legacy
-        // production key. Isolated visual-QA databases must never touch the
-        // user's Keychain (their temporary signatures would trigger an ACL
-        // permission prompt).
-        if ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_DATA_DIR"] == nil {
-            Task.detached(priority: .utility) {
-                await environment.localStore.recoverUndecryptableRows()
-            }
-        }
 
         installDebugHooks(viewModel: viewModel)
     }
@@ -133,9 +179,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// STICKYDECK_DEBUG_AUTOSAVE=1 (only alongside STICKYDECK_DEBUG_DATA_DIR)
     /// simulates typing bursts so editor focus can be verified across
     /// autosaves.
+    /// Whether the app opened an isolated debug library rather than the
+    /// user's own. `AppDatabase.open` diverts only when the variable is
+    /// present *and* non-empty, so a `!= nil` gate was satisfied by
+    /// `STICKYDECK_DEBUG_DATA_DIR=""` while the harnesses below wrote into the
+    /// real library. Every harness that touches notes checks this.
+    private static var usesIsolatedDebugLibrary: Bool {
+        !(ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_DATA_DIR"] ?? "").isEmpty
+    }
+
     private func installDebugHooks(viewModel: DeckViewModel) {
         let env = ProcessInfo.processInfo.environment
-        if env["STICKYDECK_DEBUG_SEED"] == "1" {
+        if env["STICKYDECK_DEBUG_SEED"] == "1", Self.usesIsolatedDebugLibrary {
             Task {
                 let existing = (try? await viewModel.store.fetch(filter: .all, query: "")) ?? []
                 if existing.isEmpty {
@@ -177,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Destructive: it types over the first note's body ten times. Gated
         // on the isolated debug data directory (like the keychain-recovery
         // hook) so it can never run against a real library.
-        if env["STICKYDECK_DEBUG_AUTOSAVE"] == "1", env["STICKYDECK_DEBUG_DATA_DIR"] != nil {
+        if env["STICKYDECK_DEBUG_AUTOSAVE"] == "1", Self.usesIsolatedDebugLibrary {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 viewModel.debugPinned = true
                 viewModel.state = .fan
@@ -215,6 +270,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // STICKYDECK_DEBUG_PIN=1 expands the first note and pins it, so the
+        // deck-to-desktop handoff can be captured frame by frame. That
+        // transition has regressed three times in ways only a screenshot
+        // burst caught, so it gets a harness like the fan and editor do.
+        if env["STICKYDECK_DEBUG_PIN"] == "1", Self.usesIsolatedDebugLibrary {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                viewModel.debugPinned = true
+                viewModel.state = .fan
+                guard let first = viewModel.deckNotes.first else { return }
+                viewModel.select(first.id)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    viewModel.togglePin(of: first.id)
+                }
+            }
+        }
+
         if env["STICKYDECK_DEBUG_ALL_NOTES"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 NotificationCenter.default.post(name: .openAllNotesRequested, object: nil)
@@ -239,23 +310,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting used to drop all of it — type a word, press Cmd-Q, lose the
     /// word — and leave soft-deleted rows that nothing would ever reclaim.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !isFlushingForTermination else { return .terminateNow }
+        guard !isFlushingForTermination else { return .terminateLater }
         isFlushingForTermination = true
+        setPersistenceInteractionBlocked(true)
 
-        // List windows own their models privately, so they flush themselves.
+        // The notification covers any list model hosted outside the window
+        // coordinator (including tests); owned windows are also awaited below.
         NotificationCenter.default.post(name: .appWillTerminate, object: nil)
 
         Task { @MainActor in
-            await deckController?.viewModel.flushPendingWork()
-            await stickyWindowManager?.flushPendingWork()
-            // A short grace for the notification-driven flushes above to land.
-            try? await Task.sleep(for: .milliseconds(250))
-            NSApp.reply(toApplicationShouldTerminate: true)
+            let saved = await flushAllPendingWork()
+            NSApp.reply(toApplicationShouldTerminate: saved)
+            guard !saved else { return }
+            isFlushingForTermination = false
+            setPersistenceInteractionBlocked(false)
+            presentPendingWorkError(
+                message: "StickyDeck stayed open because one or more recent edits could not be saved. Check that your notes location is available, then quit again."
+            )
         }
         return .terminateLater
     }
 
+    /// Drains every UI owner. Evaluate all three independently so a failure in
+    /// one editor does not prevent another window from preserving its draft.
+    private func flushAllPendingWork() async -> Bool {
+        while true {
+            // Sticky actions can hand Delete into the deck, so let them finish
+            // before the deck takes its final mutation snapshot.
+            await onboardingController?.flushPendingWork()
+            let stickySaved = await stickyWindowManager?.flushPendingWork() ?? true
+            let deckSaved = await deckController?.viewModel.flushPendingWork() ?? true
+            let windowsSaved = await windowCoordinator?.flushPendingWork() ?? true
+            guard stickySaved && deckSaved && windowsSaved else { return false }
+
+            // Any owner can receive another edit while a later owner suspends.
+            // Recheck all of them synchronously on MainActor before declaring
+            // the app quiescent.
+            guard onboardingController?.hasPendingWork != true,
+                  stickyWindowManager?.hasPendingWork != true,
+                  deckController?.viewModel.hasPendingWork != true,
+                  windowCoordinator?.hasPendingWork != true else { continue }
+            return true
+        }
+    }
+
+    private func presentPendingWorkError(message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Changes Couldn’t Be Saved"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func reloadActiveLibrary() async {
+        await onboardingController?.refreshActiveLibrary()
+        await deckController?.viewModel.reload()
+        await stickyWindowManager?.reloadFromStore()
+        await windowCoordinator?.reloadFromStore()
+    }
+
+    /// Resigning the active text editor commits its binding before the drain;
+    /// ignoring mouse input and disabling the status item prevents a fresh UI
+    /// action in the interval between the final flush and StoreHub's swap.
+    private func setPersistenceInteractionBlocked(_ blocked: Bool) {
+        if blocked {
+            interactionBlockCount += 1
+            guard interactionBlockCount == 1 else { return }
+            blockedWindows = NSApp.windows.map { window in
+                _ = window.makeFirstResponder(nil)
+                let previous = window.ignoresMouseEvents
+                window.ignoresMouseEvents = true
+                return (window, previous)
+            }
+            statusItemController?.setInteractionEnabled(false)
+            return
+        }
+
+        interactionBlockCount = max(interactionBlockCount - 1, 0)
+        guard interactionBlockCount == 0 else { return }
+        for entry in blockedWindows {
+            entry.window.ignoresMouseEvents = entry.ignoredMouseEvents
+        }
+        blockedWindows.removeAll()
+        statusItemController?.setInteractionEnabled(true)
+    }
+
     private func handleHotKey(_ id: UInt32) {
+        guard interactionBlockCount == 0 else { return }
         switch id {
         case HotKeyID.newNote:
             Task {

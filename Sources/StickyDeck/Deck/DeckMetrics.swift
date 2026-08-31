@@ -18,7 +18,7 @@ enum DeckMetrics {
     static let pillDashHeight: CGFloat = 16
     static let pillChipGap: CGFloat = 5
     static let pillPadding: CGFloat = 7
-    static let pillMinHeight: CGFloat = 26
+    static let pillMinHeight: CGFloat = 36
     static let pillMaxChips = 12
 
     // Fan (hover state): pastel shingles flush with the screen edge.

@@ -4,7 +4,10 @@ import SwiftUI
 /// Hosts a searchable, multi-selectable note list window (All Notes or Archive).
 @MainActor
 final class NoteListWindowController: NSWindowController {
+    let model: NoteListModel
+
     init(store: any NoteStore, mode: NoteListView.Mode, title: String) {
+        model = NoteListModel(store: store, mode: mode)
         let size = mode == .archive
             ? NSSize(width: 786, height: 490)
             : NSSize(width: 786, height: 634)
@@ -26,7 +29,7 @@ final class NoteListWindowController: NSWindowController {
             ? NSSize(width: 680, height: 420)
             : NSSize(width: 720, height: 540)
 
-        let root = NoteListView(store: store, mode: mode)
+        let root = NoteListView(model: model)
         window.contentView = NSHostingView(rootView: root)
         window.setFrameAutosaveName(autosaveName)
         if !hasSavedFrame { window.center() }
@@ -41,5 +44,15 @@ final class NoteListWindowController: NSWindowController {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func flushPendingWork() async -> Bool {
+        await model.flushPendingWork()
+    }
+
+    var hasPendingWork: Bool { model.hasPendingWork }
+
+    func reload() async {
+        await model.reload()
     }
 }

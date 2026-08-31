@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import ServiceManagement
 import SwiftUI
 
@@ -9,21 +10,93 @@ import SwiftUI
 final class OnboardingController: NSObject, NSWindowDelegate {
     private let store: any NoteStore
     private let onCreateNewNote: () -> Void
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private var window: NSWindow?
+    private var backingObservationTask: Task<Void, Never>?
+    private var seedTask: Task<Void, Never>?
+    private var seedGeneration = 0
 
     private static let completedKey = "onboardingCompleted"
+    /// Libraries that have been seen holding at least one note. Keyed per
+    /// library rather than per user: the walkthrough is a once-per-user event,
+    /// but seeding follows the library (D24).
+    private static let knownLibrariesKey = "seededLibraryKeys"
 
-    init(store: any NoteStore, onCreateNewNote: @escaping () -> Void) {
+    init(
+        store: any NoteStore,
+        onCreateNewNote: @escaping () -> Void,
+        defaults: UserDefaults = .standard
+    ) {
         self.store = store
         self.onCreateNewNote = onCreateNewNote
+        self.defaults = defaults
+    }
+
+    /// Identifies the library the store is currently backed by, so the marker
+    /// travels with the library and not with the user. The bookmark is the
+    /// authoritative identity of a sync folder; hashing keeps an opaque,
+    /// launch-stable key out of the defaults plist (`hashValue` is seeded per
+    /// process and would change every launch).
+    private static var libraryKey: String {
+        guard let bookmark = AppSettings.syncFolderBookmark else { return "local" }
+        let digest = SHA256.hash(data: bookmark)
+        return "sync:" + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private var knownLibraries: Set<String> {
+        Set(defaults.stringArray(forKey: Self.knownLibrariesKey) ?? [])
+    }
+
+    private func rememberLibrary(_ key: String) {
+        var known = knownLibraries
+        guard known.insert(key).inserted else { return }
+        defaults.set(Array(known), forKey: Self.knownLibrariesKey)
     }
 
     func install() {
         if !defaults.bool(forKey: Self.completedKey) {
             show()
         }
-        Task { await seedWelcomeNoteIfLibraryIsNew() }
+        scheduleWelcomeSeed()
+        backingObservationTask = Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: .noteStoreBackingChanged) {
+                self?.scheduleWelcomeSeed()
+            }
+        }
+    }
+
+    deinit {
+        backingObservationTask?.cancel()
+        seedTask?.cancel()
+    }
+
+    private func scheduleWelcomeSeed() {
+        seedGeneration &+= 1
+        let generation = seedGeneration
+        let prior = seedTask
+        seedTask = Task { [weak self] in
+            await prior?.value
+            guard let self, generation == self.seedGeneration else { return }
+            await self.seedWelcomeNoteIfLibraryIsNew()
+            if generation == self.seedGeneration {
+                self.seedTask = nil
+            }
+        }
+    }
+
+    /// Storage transitions wait for the outgoing library's emptiness check and
+    /// optional seed write. This keeps the check and write on one backing.
+    func flushPendingWork() async {
+        while let task = seedTask {
+            await task.value
+        }
+    }
+
+    var hasPendingWork: Bool { seedTask != nil }
+
+    func refreshActiveLibrary() async {
+        scheduleWelcomeSeed()
+        await flushPendingWork()
     }
 
     /// Seeds the welcome note when the *store* has nothing in it, not when a
@@ -35,19 +108,30 @@ final class OnboardingController: NSObject, NSWindowDelegate {
     /// a once-per-user event.
     ///
     /// The emptiness test is `allKnownIDs`, which counts archived and
-    /// soft-deleted rows too, so a library the user has deliberately cleared
-    /// out still counts as used and is left alone; only a library that has
-    /// never held a single note is seeded.
+    /// soft-deleted rows too. That alone is not enough to tell a never-used
+    /// library from a deliberately emptied one: tombstones are purged ten
+    /// seconds after the last delete (or on quit), so a user who clears the
+    /// deck and relaunches met an empty library and got the welcome note
+    /// handed back. Every library seen holding a note is therefore recorded,
+    /// and a recorded library is never seeded again however empty it becomes.
     private func seedWelcomeNoteIfLibraryIsNew() async {
+        let library = Self.libraryKey
+        guard !knownLibraries.contains(library) else { return }
+
+        let isEmpty: Bool
         do {
-            guard try await store.allKnownIDs().isEmpty else { return }
+            isEmpty = try await store.allKnownIDs().isEmpty
         } catch {
             // Could not tell — an unreadable store would only be made worse by
             // writing into it. The next launch retries.
             NSLog("StickyDeck could not check the library before seeding: %@", error.localizedDescription)
             return
         }
-        await seedWelcomeNote()
+        guard isEmpty else {
+            rememberLibrary(library)
+            return
+        }
+        await seedWelcomeNote(library: library)
     }
 
     func show() {
@@ -69,6 +153,8 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
+        // A one-time splash drawn on pastel note paper, like the deck itself.
+        window.appearance = NSAppearance(named: .aqua)
 
         window.contentView = NSHostingView(
             rootView: OnboardingView(
@@ -115,14 +201,14 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         AppSettings.deckEdge == .right ? "right" : "left"
     }
 
-    private func seedWelcomeNote() async {
+    private func seedWelcomeNote(library: String) async {
         let note = Note(
             title: "Getting started",
             body: """
             Hover the \(Self.edgeLabel) edge of the screen to open your deck.
 
             - Click a card to open it
-            - Drag cards up / down to arrange them
+            - Drag an open note up / down to reposition it
             - Pin a note to keep it on your desktop
             - ⌥⌘N makes a new note
             - ⌥⌘A lists all notes, ⌥⌘L opens the archive
@@ -134,9 +220,10 @@ final class OnboardingController: NSObject, NSWindowDelegate {
         )
         do {
             try await store.upsert(note)
+            rememberLibrary(library)
         } catch {
-            // Not flagged as done anywhere: the store is still empty, so the
-            // next launch simply tries again.
+            // Deliberately not recorded: the store is still empty, so the next
+            // launch simply tries again.
             NSLog("StickyDeck could not seed the welcome note: %@", error.localizedDescription)
         }
     }

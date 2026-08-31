@@ -164,16 +164,25 @@ enum TransferService {
         existingIDs: Set<UUID>,
         preservesArchiveState: Bool
     ) -> [Note] {
-        incoming.map { original in
+        var claimedIDs = existingIDs
+        return incoming.map { original in
             var note = original
+            // A deletion generation is never content worth preserving. Both
+            // stores' `fetch` hides a note carrying `deletedAt`, so one that
+            // survives an import lands in the library invisibly — leaving the
+            // user unable to tell a successful import from a failed one, and
+            // appending another hidden copy on every retry. Archives still
+            // keep their archived/pinned state; that is the lossless
+            // contract. The tombstone is dropped on every path.
+            note.deletedAt = nil
             if !preservesArchiveState {
                 note.archivedAt = nil
-                note.deletedAt = nil
                 note.pinned = false
             }
-            if existingIDs.contains(note.id) {
-                note.id = UUID()
+            if claimedIDs.contains(note.id) {
+                repeat { note.id = UUID() } while claimedIDs.contains(note.id)
             }
+            claimedIDs.insert(note.id)
             return note
         }
     }
@@ -183,7 +192,7 @@ enum TransferService {
     /// Parses a Markdown note: the first heading line becomes the title,
     /// everything else (minus surrounding blank lines) the body.
     nonisolated static func markdownNote(from data: Data) -> Note? {
-        guard let text = String(data: data, encoding: .utf8),
+        guard let text = normalizedUTF8Text(from: data),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
 
         var title = ""
@@ -193,8 +202,8 @@ enum TransferService {
         for line in text.components(separatedBy: "\n") {
             if !foundHeading {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("#") {
-                    title = String(trimmed.drop(while: { $0 == "#" || $0 == " " }))
+                if let heading = markdownHeading(in: trimmed) {
+                    title = heading
                     foundHeading = true
                     continue
                 }
@@ -215,7 +224,7 @@ enum TransferService {
 
     /// Parses a plain-text note: the first non-blank line becomes the title.
     nonisolated static func plainTextNote(from data: Data) -> Note? {
-        guard let text = String(data: data, encoding: .utf8),
+        guard let text = normalizedUTF8Text(from: data),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
 
         let lines = text.components(separatedBy: "\n")
@@ -233,6 +242,26 @@ enum TransferService {
         }
 
         return Note(title: title, body: bodyLines.joined(separator: "\n"))
+    }
+
+    /// A CommonMark ATX heading has one to six `#` characters followed by
+    /// whitespace (or nothing). Treating any hash-prefixed line as a heading
+    /// stripped ordinary note content such as `#include <stdio.h>` on import.
+    nonisolated private static func markdownHeading(in line: String) -> String? {
+        let marker = line.prefix { $0 == "#" }
+        guard (1...6).contains(marker.count) else { return nil }
+        let remainder = line.dropFirst(marker.count)
+        guard remainder.isEmpty || remainder.first?.isWhitespace == true else { return nil }
+        return remainder.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Files selected through the import panel commonly come from Windows.
+    /// Normalize before splitting so carriage returns do not become part of a
+    /// title or make a visually blank line count as body text.
+    nonisolated private static func normalizedUTF8Text(from data: Data) -> String? {
+        String(data: data, encoding: .utf8)?
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
     }
 
     // MARK: - File naming

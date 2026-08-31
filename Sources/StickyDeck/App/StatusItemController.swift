@@ -27,6 +27,10 @@ final class StatusItemController: NSObject {
         menu.delegate = self
         statusItem.menu = menu
     }
+
+    func setInteractionEnabled(_ enabled: Bool) {
+        statusItem.button?.isEnabled = enabled
+    }
 }
 
 extension StatusItemController: NSMenuDelegate {

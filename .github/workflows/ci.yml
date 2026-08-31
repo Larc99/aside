@@ -13,15 +13,19 @@ concurrency:
 jobs:
   test:
     name: Build and test
-    runs-on: macos-15
+    # macOS 26, not 15. The deployment target stays macOS 15, but the deck's
+    # Liquid Glass surfaces are compiled behind `#available(macOS 26.0, *)`,
+    # and an `#available` check guards the runtime — the symbol still has to
+    # exist in the SDK the build uses. On the macos-15 image it does not.
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Show toolchain
         run: swift --version
 
       - name: Cache SwiftPM
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .build
           # Scoped to the repository because .build stores absolute paths:
@@ -39,9 +43,9 @@ jobs:
 
   bundle:
     name: Assemble the app
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # make_app.sh derives the version from the nearest tag and the commit
           # count, neither of which exists in the default shallow checkout.
@@ -51,16 +55,24 @@ jobs:
       # sandbox entitlements all still assemble — none of which `swift build`
       # exercises.
       - name: Build StickyDeck.app
-        run: scripts/make_app.sh
+        run: STICKYDECK_UNIVERSAL=1 scripts/make_app.sh
 
       - name: Verify bundle identity and signature
         run: |
           /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" build/StickyDeck.app/Contents/Info.plist
-          codesign -v build/StickyDeck.app
+          codesign --verify --deep --strict --all-architectures build/StickyDeck.app
+          lipo build/StickyDeck.app/Contents/MacOS/StickyDeck -verify_arch arm64 x86_64
           test -d build/StickyDeck.app/Contents/Resources/Fonts
           test -f build/StickyDeck.app/Contents/Resources/Fonts/OFL.txt  # OFL: must ship with the fonts
 
-      - uses: actions/upload-artifact@v4
+      # upload-artifact normalizes modes when it walks a directory. Preserve
+      # the app bundle (especially Contents/MacOS/StickyDeck's executable bit)
+      # in a macOS-native zip before handing it to the action.
+      - name: Package runnable artifact
+        run: ditto -c -k --keepParent build/StickyDeck.app build/StickyDeck.zip
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: StickyDeck.app
-          path: build/StickyDeck.app
+          name: StickyDeck-macOS-universal
+          path: build/StickyDeck.zip
+          compression-level: 0

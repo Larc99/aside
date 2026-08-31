@@ -22,7 +22,10 @@ enum AppSettings {
         }
     }
 
-    private static let defaults = UserDefaults.standard
+    // A computed accessor avoids storing a non-Sendable Foundation reference
+    // in global state. UserDefaults itself owns the synchronization for its
+    // process-wide standard instance.
+    private static var defaults: UserDefaults { .standard }
 
     private enum Keys {
         static let deckEdge = "deckEdge"
@@ -69,7 +72,7 @@ enum AppSettings {
     }
 
     /// Security-scoped bookmark for the sync folder (D22). `nil` means
-    /// "this Mac only": notes live in the encrypted local SQLite store.
+    /// "this Mac only": notes live in the local plaintext SQLite store.
     /// Resolution and store swapping are `SyncFolderCoordinator`'s job.
     static var syncFolderBookmark: Data? {
         get { defaults.data(forKey: Keys.syncFolderBookmark) }

@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import GRDB
 
 struct NoteRecord: Codable, FetchableRecord, MutablePersistableRecord {
@@ -7,6 +6,7 @@ struct NoteRecord: Codable, FetchableRecord, MutablePersistableRecord {
 
     var id: String
     var title: String
+    var body: String
     var bodyEnc: Data?
     var colorIndex: Int
     var tag: String
@@ -18,12 +18,24 @@ struct NoteRecord: Codable, FetchableRecord, MutablePersistableRecord {
     var deletedAt: Date?
 }
 
+enum NoteRecordError: Error, LocalizedError {
+    case invalidIdentifier(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidIdentifier(let value):
+            return "A stored note has an invalid identifier (\(value)). The database was left unchanged."
+        }
+    }
+}
+
 enum NoteMapper {
-    static func record(from note: Note, key: SymmetricKey) throws -> NoteRecord {
+    static func record(from note: Note) -> NoteRecord {
         NoteRecord(
             id: note.id.uuidString,
             title: note.title,
-            bodyEnc: try NoteCipher.encrypt(note.body, key: key),
+            body: note.body,
+            bodyEnc: nil,
             colorIndex: note.colorIndex,
             tag: note.tag,
             pinned: note.pinned,
@@ -35,29 +47,17 @@ enum NoteMapper {
         )
     }
 
-    static func note(from record: NoteRecord, key: SymmetricKey) throws -> Note {
-        Note(
-            id: UUID(uuidString: record.id) ?? UUID(),
+    static func note(from record: NoteRecord) throws -> Note {
+        guard let id = UUID(uuidString: record.id) else {
+            // Inventing a new UUID on every fetch made the same damaged row
+            // appear under a different identity each time and made it
+            // impossible to update or remove safely.
+            throw NoteRecordError.invalidIdentifier(record.id)
+        }
+        return Note(
+            id: id,
             title: record.title,
-            body: try NoteCipher.decrypt(record.bodyEnc, key: key),
-            colorIndex: record.colorIndex,
-            tag: record.tag,
-            pinned: record.pinned,
-            sortIndex: record.sortIndex,
-            createdAt: record.createdAt,
-            updatedAt: record.updatedAt,
-            archivedAt: record.archivedAt,
-            deletedAt: record.deletedAt
-        )
-    }
-
-    /// Metadata-only mapping for rows whose body cannot be decrypted with any
-    /// known key. Never throws — a damaged row must not blank the whole list.
-    static func noteSkippingBody(from record: NoteRecord) -> Note {
-        Note(
-            id: UUID(uuidString: record.id) ?? UUID(),
-            title: record.title,
-            body: "",
+            body: record.body,
             colorIndex: record.colorIndex,
             tag: record.tag,
             pinned: record.pinned,
@@ -66,7 +66,7 @@ enum NoteMapper {
             updatedAt: record.updatedAt,
             archivedAt: record.archivedAt,
             deletedAt: record.deletedAt,
-            bodyUnavailable: true
+            bodyNeedsMigration: record.body.isEmpty && record.bodyEnc != nil
         )
     }
 }

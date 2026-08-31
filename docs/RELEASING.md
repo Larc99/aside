@@ -2,8 +2,9 @@
 
 `scripts/make_app.sh` ad-hoc signs by default, which is right for local builds
 and CI but will not pass Gatekeeper on anyone else's Mac. Distributable builds
-go through `scripts/release.sh`, which signs with a Developer ID, notarizes,
-staples the ticket and leaves a zip ready to upload.
+go through `scripts/release.sh`, which builds a universal Apple silicon/Intel
+binary, signs it with a Developer ID, notarizes it, staples the ticket and
+leaves a zip ready to upload.
 
 ## One-time setup
 
@@ -46,7 +47,8 @@ There is no version to bump by hand. `CFBundleShortVersionString` is the tag
 without its leading `v`, and `CFBundleVersion` is the commit count, which
 increases monotonically on a linear history. `release.sh` refuses to run on an
 untagged HEAD or a shallow clone, since either would ship a build labelled
-`0.0.0`.
+`0.0.0`. It also requires a completely clean working tree so the downloadable
+artifact can be reproduced from the tagged commit.
 
 `release.sh` ends by running `spctl --assess`, which must report
 `source=Notarized Developer ID`. That is the check that reflects what a

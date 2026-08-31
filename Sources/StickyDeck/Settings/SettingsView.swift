@@ -1,22 +1,11 @@
 import SwiftUI
-import Combine
-
-/// Refreshes the settings UI when settings change elsewhere (status item,
-/// pill context menu) while the window is open. Values themselves are read
-/// from / written through `AppSettings`, so there is a single source of truth.
-@MainActor
-final class SettingsModel: ObservableObject {
-    private var cancellable: AnyCancellable?
-
-    init() {
-        cancellable = NotificationCenter.default.publisher(for: .appSettingsChanged)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-    }
-}
 
 struct SettingsView: View {
-    @ObservedObject private var model = SettingsModel()
+    /// Every control below writes through `AppSettings` and reads back through
+    /// this mirror, so a change made elsewhere — the status item or the pill's
+    /// context menu — updates the open window without a change broadcast of
+    /// its own.
+    private let appearance = AppAppearance.shared
     @State private var selectedPane: Pane = .general
     @State private var confirmsStoppingSync = false
     @State private var folderError: String?
@@ -147,7 +136,7 @@ struct SettingsView: View {
                     Button("Stop Syncing", role: .destructive) {
                         confirmsStoppingSync = true
                     }
-                    .disabled(AppSettings.syncFolderBookmark == nil)
+                    .disabled(!appearance.hasSyncFolder)
                 }
             }
         }
@@ -165,36 +154,33 @@ struct SettingsView: View {
     // MARK: - Bindings (write through to AppSettings)
 
     private var edgeBinding: Binding<AppSettings.Edge> {
-        Binding(get: { AppSettings.deckEdge }, set: { AppSettings.deckEdge = $0 })
+        Binding(get: { appearance.deckEdge }, set: { AppSettings.deckEdge = $0 })
     }
 
     private var speedBinding: Binding<AppSettings.AnimationSpeed> {
-        Binding(get: { AppSettings.animationSpeed }, set: { AppSettings.animationSpeed = $0 })
+        Binding(get: { appearance.animationSpeed }, set: { AppSettings.animationSpeed = $0 })
     }
 
     private var fullscreenBinding: Binding<Bool> {
-        Binding(get: { AppSettings.showOverFullScreen }, set: { AppSettings.showOverFullScreen = $0 })
+        Binding(get: { appearance.showOverFullScreen }, set: { AppSettings.showOverFullScreen = $0 })
     }
 
     private var fontNameBinding: Binding<String> {
-        Binding(get: { AppSettings.noteFontName }, set: { AppSettings.noteFontName = $0 })
+        Binding(get: { appearance.noteFontName }, set: { AppSettings.noteFontName = $0 })
     }
 
     private var fontSizeBinding: Binding<Double> {
-        Binding(get: { AppSettings.noteFontSize }, set: { AppSettings.noteFontSize = $0 })
+        Binding(get: { appearance.noteFontSize }, set: { AppSettings.noteFontSize = $0 })
     }
 
     // MARK: - Sync folder
 
     private var syncFolderLabel: String {
-        let name = AppSettings.syncFolderName
-        return name.isEmpty ? "This Mac only" : name
+        appearance.syncFolderName.isEmpty ? "This Mac only" : appearance.syncFolderName
     }
 
     private var syncFolderHint: String {
-        AppSettings.syncFolderBookmark == nil
-            ? "Encrypted on this Mac"
-            : "Markdown files"
+        appearance.hasSyncFolder ? "Markdown files" : "Plain text on this Mac"
     }
 
     private func chooseSyncFolder() async {
@@ -239,12 +225,7 @@ struct SettingsView: View {
     }()
 
     private var previewFont: Font {
-        let name = AppSettings.noteFontName
-        let size = AppSettings.noteFontSize
-        guard !name.isEmpty, NSFont(name: name, size: size) != nil else {
-            return .system(size: size, weight: .regular, design: .rounded)
-        }
-        return .custom(name, size: size)
+        appearance.bodyFont
     }
 }
 

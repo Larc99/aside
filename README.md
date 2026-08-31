@@ -11,7 +11,7 @@ switch to.
 
 Free, open source, and entirely offline.
 
-<!-- TODO: screenshot of the fanned deck goes here. Stage it with STICKYDECK_DEBUG_SEED=1 STICKYDECK_DEBUG_FAN=1. -->
+<!-- TODO: screenshot of the fanned deck goes here. Stage it with STICKYDECK_DEBUG_DATA_DIR=shots STICKYDECK_DEBUG_SEED=1 STICKYDECK_DEBUG_FAN=1. -->
 
 [![CI](https://github.com/Larc99/stickydeck/actions/workflows/ci.yml/badge.svg)](https://github.com/Larc99/stickydeck/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
@@ -57,10 +57,11 @@ version, go buy theirs. It is six dollars and it is good.
 
 ## Privacy
 
-Your notes stay on your Mac. Note bodies are AES-GCM encrypted before they are
-written, with the key in your login keychain. StickyDeck makes no network
-connections at all — no accounts, no telemetry, no crash reporting, and no
-third-party SDKs beyond its database library.
+Your notes stay on your Mac, in a SQLite database inside the app's sandbox
+container. StickyDeck makes no network connections at all — no accounts, no
+telemetry, no crash reporting, and no third-party SDKs beyond its database
+library. Notes are stored as plain text; at-rest protection is FileVault's
+job.
 
 [SECURITY.md](SECURITY.md) sets out exactly what is and is not protected,
 including the parts deliberately left in plaintext.

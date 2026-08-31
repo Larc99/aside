@@ -17,20 +17,34 @@ BUNDLE_ID="app.stickydeck.StickyDeck"
 # A shallow clone can do neither: it has no tags and cannot count commits.
 # That is fine for CI and local builds, which only need well-formed values;
 # release.sh refuses to publish from a tree where these would be wrong.
-VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
-VERSION="${VERSION:-0.0.0}"
+RAW_VERSION_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+if [[ "$RAW_VERSION_TAG" =~ ^v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    VERSION="${BASH_REMATCH[1]}"
+else
+    # Local/CI builds from an untagged or non-release-tagged history still need
+    # an Apple-valid CFBundleShortVersionString (three period-separated ints).
+    VERSION="0.0.0"
+fi
 BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 OUT_DIR="${1:-build}"
 APP="$OUT_DIR/$APP_NAME.app"
 
-swift build -c release
-BIN="$(swift build -c release --show-bin-path)"
+if [ "${STICKYDECK_UNIVERSAL:-0}" = "1" ]; then
+    ARM_TRIPLE="arm64-apple-macosx15.0"
+    INTEL_TRIPLE="x86_64-apple-macosx15.0"
+    swift build -c release --triple "$ARM_TRIPLE"
+    swift build -c release --triple "$INTEL_TRIPLE"
+    ARM_BIN="$(swift build -c release --triple "$ARM_TRIPLE" --show-bin-path)"
+    INTEL_BIN="$(swift build -c release --triple "$INTEL_TRIPLE" --show-bin-path)"
+    BIN="$ARM_BIN"
+else
+    swift build -c release
+    BIN="$(swift build -c release --show-bin-path)"
+fi
 
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-# Rebuild Resources from scratch: `cp -R` into an existing directory nests
-# copies inside it, so re-runs would otherwise accumulate stale duplicates.
-rm -rf "$APP/Contents/Resources"
 mkdir -p "$APP/Contents/Resources"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -42,6 +56,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>StickyDeck</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
@@ -55,8 +70,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-cp "$BIN/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
+if [ "${STICKYDECK_UNIVERSAL:-0}" = "1" ]; then
+    lipo -create \
+        "$ARM_BIN/$APP_NAME" \
+        "$INTEL_BIN/$APP_NAME" \
+        -output "$APP/Contents/MacOS/$APP_NAME"
+else
+    cp "$BIN/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
+fi
 cp -R Sources/StickyDeck/Resources/Fonts "$APP/Contents/Resources/Fonts"
+
+# The icon is generated art, not a checked-in blob you cannot edit: run
+# scripts/make_icon.swift to regenerate it from source. StickyDeck is an
+# LSUIElement app, so this never reaches the Dock — it is what Finder, Get
+# Info, Spotlight, the About panel and the release disk image show.
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # SPM resource bundle must ship next to the executable's resources, otherwise
 # the generated Bundle.module accessor aborts the process on first touch.

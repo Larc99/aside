@@ -1,21 +1,5 @@
 import AppKit
 
-/// A one-shot seam between the deck and sticky-window modules. Pinning hands
-/// off the live card frame here so the same 400x450 surface does not jump
-/// during the asynchronous store update that creates its window.
-@MainActor
-enum PinnedNotePlacementHints {
-    private static var frames: [UUID: CGRect] = [:]
-
-    static func record(_ frame: CGRect, for noteID: UUID) {
-        frames[noteID] = frame
-    }
-
-    static func take(for noteID: UUID) -> CGRect? {
-        frames.removeValue(forKey: noteID)
-    }
-}
-
 /// Pure screen placement policy shared by initial presentation, screen
 /// changes, and AppKit's live window constraints.
 enum StickyPlacement {

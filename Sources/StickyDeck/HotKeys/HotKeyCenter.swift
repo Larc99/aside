@@ -18,7 +18,7 @@ final class HotKeyCenter {
 
     @discardableResult
     func register(id: UInt32, keyCode: UInt32, modifiers: UInt32, handler: @escaping () -> Void) -> Bool {
-        installHandlerIfNeeded()
+        guard installHandlerIfNeeded() else { return false }
 
         var ref: EventHotKeyRef?
         let status = RegisterEventHotKey(
@@ -26,7 +26,7 @@ final class HotKeyCenter {
             modifiers,
             EventHotKeyID(signature: HotKeyCenter.signature, id: id),
             GetApplicationEventTarget(),
-            0,
+            OptionBits(kEventHotKeyExclusive),
             &ref
         )
         guard status == noErr else { return false }
@@ -45,9 +45,14 @@ final class HotKeyCenter {
         handlers.removeAll()
     }
 
-    private func installHandlerIfNeeded() {
-        guard !installed else { return }
-        installed = true
+    /// Returns false when the Carbon handler could not be installed.
+    ///
+    /// `installed` is set only on success. Setting it before the call meant a
+    /// failed install was never retried, while `register` went on returning
+    /// true for every shortcut — so `unavailableStandardIDs` stayed empty and
+    /// Settings advertised system-wide hotkeys that could never fire.
+    private func installHandlerIfNeeded() -> Bool {
+        guard !installed else { return true }
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -55,7 +60,7 @@ final class HotKeyCenter {
         )
         let userData = Unmanaged.passUnretained(self).toOpaque()
 
-        InstallEventHandler(
+        let status = InstallEventHandler(
             GetApplicationEventTarget(),
             hotKeyCallback,
             1,
@@ -63,6 +68,9 @@ final class HotKeyCenter {
             userData,
             nil
         )
+        guard status == noErr else { return false }
+        installed = true
+        return true
     }
 
     fileprivate func dispatch(_ id: UInt32) {
@@ -84,9 +92,10 @@ private let hotKeyCallback: EventHandlerUPP = { _, event, userData in
     )
     guard status == noErr else { return noErr }
     let center = Unmanaged<HotKeyCenter>.fromOpaque(userData).takeUnretainedValue()
+    let id = hotKeyID.id
     DispatchQueue.main.async {
         MainActor.assumeIsolated {
-            center.dispatch(hotKeyID.id)
+            center.dispatch(id)
         }
     }
     return noErr
