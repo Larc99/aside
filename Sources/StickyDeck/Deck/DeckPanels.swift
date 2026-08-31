@@ -20,6 +20,10 @@ class DeckPanel: NSPanel {
         becomesKeyOnlyIfNeeded = true
         acceptsMouseMovedEvents = true
         animationBehavior = .utilityWindow
+        // This panel is a sheet of pastel note paper: its fill is a fixed
+        // light colour and its text is black, so it stays in the light
+        // appearance whatever the system is set to.
+        appearance = NSAppearance(named: .aqua)
         applyFullscreenBehavior()
     }
 
@@ -48,6 +52,10 @@ class PillPanel: NSPanel {
         hasShadow = false
         hidesOnDeactivate = false
         isMovableByWindowBackground = false
+        // This panel is a sheet of pastel note paper: its fill is a fixed
+        // light colour and its text is black, so it stays in the light
+        // appearance whatever the system is set to.
+        appearance = NSAppearance(named: .aqua)
         applyFullscreenBehavior()
     }
 

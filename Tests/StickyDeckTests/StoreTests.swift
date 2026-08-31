@@ -3,102 +3,34 @@ import CryptoKit
 import GRDB
 @testable import StickyDeck
 
-final class NoteCipherTests: XCTestCase {
-    func testRoundtrip() throws {
-        let key = SymmetricKey(size: .bits256)
-        let body = "apple\n4x banana\ndry fruits 🥜"
-        let sealed = try NoteCipher.encrypt(body, key: key)
-        XCTAssertNotNil(sealed)
-        XCTAssertNotEqual(sealed, Data(body.utf8))
-        XCTAssertEqual(try NoteCipher.decrypt(sealed, key: key), body)
+private final class CleanupRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+
+    var wasCalled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 
-    func testEmptyBodyEncodesToNil() throws {
-        let key = SymmetricKey(size: .bits256)
-        XCTAssertNil(try NoteCipher.encrypt("", key: key))
-        XCTAssertEqual(try NoteCipher.decrypt(nil, key: key), "")
-    }
-
-    func testWrongKeyFails() throws {
-        let sealed = try NoteCipher.encrypt("secret", key: SymmetricKey(size: .bits256))
-        XCTAssertThrowsError(try NoteCipher.decrypt(sealed, key: SymmetricKey(size: .bits256)))
+    func record() {
+        lock.lock()
+        storage = true
+        lock.unlock()
     }
 }
 
 final class LocalNoteStoreTests: XCTestCase {
     private func makeStore() throws -> LocalNoteStore {
         let database = try AppDatabase.inMemory()
-        return LocalNoteStore(database: database, key: SymmetricKey(size: .bits256))
-    }
-
-    /// Regression: a body encrypted under a key we no longer have came back as
-    /// an empty string with no marker, and `NoteCipher.encrypt("")` returns
-    /// nil — so any incidental save (a colour change, a pin, an archive) wrote
-    /// `bodyEnc = NULL` and destroyed content the recovery pass could still
-    /// have rescued.
-    func testAnUnreadableBodyIsNeverOverwrittenByAnIncidentalSave() async throws {
-        let database = try AppDatabase.inMemory()
-        let originalKey = SymmetricKey(size: .bits256)
-        let writer = LocalNoteStore(database: database, key: originalKey)
-
-        let note = Note(title: "Payload", body: "the text that must survive")
-        try await writer.upsert(note)
-
-        // Reopen with a different key, exactly as a key change would.
-        let strangerKey = SymmetricKey(size: .bits256)
-        let stranger = LocalNoteStore(database: database, key: strangerKey)
-
-        let seen = try await stranger.fetch(filter: .all, query: "")
-        let damaged = try XCTUnwrap(seen.first)
-        XCTAssertTrue(damaged.bodyUnavailable, "An undecryptable body must be flagged, not look empty")
-        XCTAssertEqual(damaged.body, "")
-
-        // The incidental edit: recolour the note without ever opening it.
-        var recoloured = damaged
-        recoloured.colorIndex = NoteColor.mint.rawValue
-        try await stranger.upsert(recoloured)
-
-        // The metadata change lands...
-        let afterEdit = try await stranger.fetch(filter: .all, query: "")
-        XCTAssertEqual(afterEdit.first?.colorIndex, NoteColor.mint.rawValue)
-
-        // ...and the ciphertext is still intact for whoever holds the real key.
-        let rightful = LocalNoteStore(database: database, key: originalKey)
-        let recovered = try await rightful.fetch(filter: .all, query: "")
-        XCTAssertEqual(recovered.first?.body, "the text that must survive")
-        XCTAssertFalse(recovered.first?.bodyUnavailable ?? true)
-    }
-
-    /// The guard must not freeze a body the user genuinely edits.
-    func testTypingIntoADamagedNoteReplacesTheUnreadableBody() async throws {
-        let database = try AppDatabase.inMemory()
-        let writer = LocalNoteStore(database: database, key: SymmetricKey(size: .bits256))
-        try await writer.upsert(Note(title: "Payload", body: "unreadable later"))
-
-        let newKey = SymmetricKey(size: .bits256)
-        let store = LocalNoteStore(database: database, key: newKey)
-        let damagedRows = try await store.fetch(filter: .all, query: "")
-        let damaged = try XCTUnwrap(damagedRows.first)
-
-        try await NoteContentWriter.saveContent(
-            {
-                var draft = damaged
-                draft.body = "typed fresh"
-                return draft
-            }(),
-            to: store
-        )
-
-        let after = try await store.fetch(filter: .all, query: "")
-        XCTAssertEqual(after.first?.body, "typed fresh")
-        XCTAssertFalse(after.first?.bodyUnavailable ?? true)
+        return LocalNoteStore(database: database)
     }
 
     func testAllKnownIDsIncludesSoftDeletedRows() async throws {
         let store = try makeStore()
         let note = Note(title: "trashed")
         try await store.upsert(note)
-        try await store.softDelete(id: note.id)
+        _ = try await store.softDelete(id: note.id)
 
         let visible = try await store.fetch(filter: .all, query: "")
         XCTAssertTrue(visible.isEmpty)
@@ -133,19 +65,15 @@ final class LocalNoteStoreTests: XCTestCase {
         XCTAssertEqual(byTag.map(\.id), [active.id])
     }
 
-    func testBodiesAreEncryptedAtRest() async throws {
+    func testBodiesRoundTripThroughTheDatabase() async throws {
         let database = try AppDatabase.inMemory()
-        let key = SymmetricKey(size: .bits256)
-        let store = LocalNoteStore(database: database, key: key)
+        let store = LocalNoteStore(database: database)
 
-        try await store.upsert(Note(title: "Visible", body: "plaintext-secret"))
+        try await store.upsert(Note(title: "Visible", body: "line one\nline two 🥜"))
 
-        let raw: Data? = try await database.writer.read { db in
-            try Data.fetchOne(db, sql: "SELECT bodyEnc FROM note WHERE title = ?", arguments: ["Visible"])
-        }
-        XCTAssertNotNil(raw)
-        XCTAssertNotEqual(raw, Data("plaintext-secret".utf8))
-        XCTAssertNil(String(data: raw!, encoding: .utf8)?.range(of: "plaintext-secret"))
+        let reopened = LocalNoteStore(database: database)
+        let notes = try await reopened.fetch(filter: .all, query: "")
+        XCTAssertEqual(notes.first?.body, "line one\nline two 🥜")
     }
 
     func testSoftDeleteRestoreAndPurge() async throws {
@@ -153,17 +81,292 @@ final class LocalNoteStoreTests: XCTestCase {
         let note = Note(title: "Bye")
         try await store.upsert(note)
 
-        try await store.softDelete(id: note.id)
+        let firstDeletionResult = try await store.softDelete(id: note.id)
+        let firstDeletion = try XCTUnwrap(firstDeletionResult)
         let afterDelete = try await store.fetch(filter: .all, query: "")
         XCTAssertTrue(afterDelete.isEmpty)
 
-        try await store.restore(id: note.id)
+        let didRestore = try await store.restore(firstDeletion)
+        XCTAssertTrue(didRestore)
         let restored = try await store.fetch(filter: .all, query: "")
         XCTAssertEqual(restored.count, 1)
 
-        try await store.purge(id: note.id)
+        let secondDeletionResult = try await store.softDelete(id: note.id)
+        let secondDeletion = try XCTUnwrap(secondDeletionResult)
+        let didPurge = try await store.purge(secondDeletion)
+        XCTAssertTrue(didPurge)
         let remaining = try await store.fetch(filter: .all, query: "")
         XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testDeletionTokenCannotAffectARestoredOrNewerDeletion() async throws {
+        let store = try makeStore()
+        let note = Note(title: "Keep the newer state")
+        try await store.upsert(note)
+
+        let firstResult = try await store.softDelete(id: note.id)
+        let first = try XCTUnwrap(firstResult)
+        let duplicate = try await store.softDelete(id: note.id)
+        XCTAssertNil(duplicate, "an existing tombstone has one owner")
+        let didRestoreFirst = try await store.restore(first)
+        XCTAssertTrue(didRestoreFirst)
+        let didRestoreConsumed = try await store.restore(first)
+        XCTAssertFalse(didRestoreConsumed, "a consumed Undo token is stale")
+        let didPurgeRestored = try await store.purge(first)
+        XCTAssertFalse(didPurgeRestored, "expiry must not purge a restored note")
+        let afterRestore = try await store.fetch(filter: .all, query: "")
+        XCTAssertEqual(afterRestore.map(\.id), [note.id])
+
+        let secondResult = try await store.softDelete(id: note.id)
+        let second = try XCTUnwrap(secondResult)
+        XCTAssertNotEqual(first, second)
+        let didRestoreNewerWithOldToken = try await store.restore(first)
+        XCTAssertFalse(didRestoreNewerWithOldToken, "old Undo must not revive a newer deletion")
+        let didPurgeNewerWithOldToken = try await store.purge(first)
+        XCTAssertFalse(didPurgeNewerWithOldToken, "old expiry must not remove a newer deletion")
+        let didRestoreSecond = try await store.restore(second)
+        XCTAssertTrue(didRestoreSecond)
+        let afterSecondRestore = try await store.fetch(filter: .all, query: "")
+        XCTAssertEqual(afterSecondRestore.map(\.id), [note.id])
+    }
+
+    func testAtomicMutationUsesTheCurrentCopyAndPreservesStoreOwnedFields() async throws {
+        let store = try makeStore()
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        let note = Note(title: "Original", body: "current body", createdAt: created)
+        try await store.upsert(note)
+
+        let changed = try await store.mutate(id: note.id) { current in
+            current.title = "Renamed"
+            current.id = UUID()
+            current.createdAt = .distantFuture
+            current.deletedAt = Date()
+        }
+
+        XCTAssertTrue(changed)
+        let fetched = try await store.fetch(filter: .all, query: "")
+        let stored = try XCTUnwrap(fetched.first)
+        XCTAssertEqual(stored.id, note.id)
+        XCTAssertEqual(stored.title, "Renamed")
+        XCTAssertEqual(stored.body, "current body")
+        XCTAssertEqual(stored.createdAt, created)
+        XCTAssertNil(stored.deletedAt)
+        XCTAssertGreaterThan(stored.updatedAt, note.updatedAt)
+    }
+
+    func testAtomicMutationCannotResurrectASoftDeletedNote() async throws {
+        let store = try makeStore()
+        let note = Note(body: "keep me deleted")
+        try await store.upsert(note)
+        _ = try await store.softDelete(id: note.id)
+
+        let changed = try await store.mutate(id: note.id) { $0.body = "resurrected" }
+
+        XCTAssertFalse(changed)
+        let visible = try await store.fetch(filter: .all, query: "")
+        let known = try await store.allKnownIDs()
+        XCTAssertTrue(visible.isEmpty)
+        XCTAssertTrue(known.contains(note.id))
+    }
+
+    func testInvalidStoredIdentifierFailsStablyInsteadOfInventingAnIdentity() async throws {
+        let database = try AppDatabase.inMemory()
+        let now = Date()
+        try await database.writer.write { db in
+            var record = NoteRecord(
+                id: "not-a-uuid",
+                title: "Damaged row",
+                body: "leave these bytes alone",
+                bodyEnc: nil,
+                colorIndex: 0,
+                tag: "",
+                pinned: false,
+                sortIndex: 0,
+                createdAt: now,
+                updatedAt: now,
+                archivedAt: nil,
+                deletedAt: nil
+            )
+            try record.insert(db)
+        }
+        let store = LocalNoteStore(database: database)
+
+        do {
+            _ = try await store.fetch(filter: .all, query: "")
+            XCTFail("A corrupt primary key must be reported, not replaced by a random UUID")
+        } catch NoteRecordError.invalidIdentifier(let value) {
+            XCTAssertEqual(value, "not-a-uuid")
+        }
+
+        let storedID: String? = try await database.writer.read { db in
+            try String.fetchOne(db, sql: "SELECT id FROM note")
+        }
+        XCTAssertEqual(storedID, "not-a-uuid", "reading a damaged row must not mutate it")
+    }
+}
+
+final class LegacyEncryptedBodiesTests: XCTestCase {
+    private func stageLegacyBody(
+        _ plaintext: String,
+        key: SymmetricKey,
+        in database: AppDatabase
+    ) async throws -> Note {
+        let note = Note(title: "Legacy")
+        try await LocalNoteStore(database: database).upsert(note)
+        let sealed = try XCTUnwrap(try AES.GCM.seal(Data(plaintext.utf8), using: key).combined)
+        try await database.writer.write { db in
+            try db.execute(
+                sql: "UPDATE note SET body = '', bodyEnc = ? WHERE id = ?",
+                arguments: [sealed, note.id.uuidString]
+            )
+        }
+        return note
+    }
+
+    func testMigrationUsesTheLegacyFileKey() async throws {
+        let database = try AppDatabase.inMemory()
+        let key = SymmetricKey(size: .bits256)
+        let note = try await stageLegacyBody("from the source build", key: key, in: database)
+        let keyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try key.withUnsafeBytes { try Data($0).write(to: keyURL) }
+        defer { try? FileManager.default.removeItem(at: keyURL) }
+
+        await LegacyEncryptedBodies.migrate(
+            in: database,
+            fileKeyURL: keyURL,
+            keychainKeyProvider: { nil },
+            cleanup: {}
+        )
+
+        let migrated = try await LocalNoteStore(database: database).fetch(filter: .all, query: "")
+        XCTAssertEqual(migrated.first(where: { $0.id == note.id })?.body, "from the source build")
+    }
+
+    func testMigrationDoesNotOverwriteAnEditMadeWhileWaitingForTheKey() async throws {
+        let database = try AppDatabase.inMemory()
+        let key = SymmetricKey(size: .bits256)
+        let note = try await stageLegacyBody("old body", key: key, in: database)
+
+        await LegacyEncryptedBodies.migrate(
+            in: database,
+            fileKeyURL: nil,
+            keychainKeyProvider: {
+                var edited = note
+                edited.body = "typed while the prompt was open"
+                try? await LocalNoteStore(database: database).upsert(edited)
+                return key
+            },
+            cleanup: {}
+        )
+
+        let migrated = try await LocalNoteStore(database: database).fetch(filter: .all, query: "")
+        XCTAssertEqual(migrated.first?.body, "typed while the prompt was open")
+    }
+
+    func testDraftLoadedBeforeMigrationCannotEraseTheRecoveredBody() async throws {
+        let database = try AppDatabase.inMemory()
+        let store = LocalNoteStore(database: database)
+        let key = SymmetricKey(size: .bits256)
+        _ = try await stageLegacyBody("recovered text", key: key, in: database)
+        let beforeMigration = try await store.fetch(filter: .all, query: "")
+        var staleDraft = try XCTUnwrap(beforeMigration.first)
+
+        await LegacyEncryptedBodies.migrate(
+            in: database,
+            fileKeyURL: nil,
+            keychainKeyProvider: { key },
+            cleanup: {}
+        )
+        staleDraft.title = "Renamed while recovery finished"
+        try await NoteContentWriter.saveContent(staleDraft, to: store)
+
+        let afterStaleSave = try await store.fetch(filter: .all, query: "")
+        let saved = try XCTUnwrap(afterStaleSave.first)
+        XCTAssertEqual(saved.title, "Renamed while recovery finished")
+        XCTAssertEqual(saved.body, "recovered text")
+    }
+
+    func testMigrationKeepsTheKeyWhenAWriteFails() async throws {
+        let database = try AppDatabase.inMemory()
+        let key = SymmetricKey(size: .bits256)
+        _ = try await stageLegacyBody("must remain recoverable", key: key, in: database)
+        try await database.writer.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER rejectLegacyMigration
+                BEFORE UPDATE OF body ON note
+                WHEN OLD.bodyEnc IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced migration failure');
+                END
+                """)
+        }
+        let cleanup = CleanupRecorder()
+
+        await LegacyEncryptedBodies.migrate(
+            in: database,
+            fileKeyURL: nil,
+            keychainKeyProvider: { key },
+            cleanup: { cleanup.record() }
+        )
+
+        XCTAssertFalse(cleanup.wasCalled, "The only recovery key must survive a failed database write")
+        let ciphertext: Data? = try await database.writer.read { db in
+            try Data.fetchOne(db, sql: "SELECT bodyEnc FROM note")
+        }
+        XCTAssertNotNil(ciphertext)
+    }
+
+    func testMigrationTriesFileAndKeychainKeysBeforeCleaningUp() async throws {
+        let database = try AppDatabase.inMemory()
+        let fileKey = SymmetricKey(size: .bits256)
+        let keychainKey = SymmetricKey(size: .bits256)
+        let fileNote = try await stageLegacyBody("file-key body", key: fileKey, in: database)
+        let keychainNote = try await stageLegacyBody("keychain body", key: keychainKey, in: database)
+        let keyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try fileKey.withUnsafeBytes { try Data($0).write(to: keyURL) }
+        defer { try? FileManager.default.removeItem(at: keyURL) }
+        let cleanup = CleanupRecorder()
+
+        await LegacyEncryptedBodies.migrate(
+            in: database,
+            fileKeyURL: keyURL,
+            keychainKeyProvider: { keychainKey },
+            cleanup: { cleanup.record() }
+        )
+
+        let migrated = try await LocalNoteStore(database: database).fetch(filter: .all, query: "")
+        XCTAssertEqual(migrated.first(where: { $0.id == fileNote.id })?.body, "file-key body")
+        XCTAssertEqual(migrated.first(where: { $0.id == keychainNote.id })?.body, "keychain body")
+        XCTAssertTrue(cleanup.wasCalled)
+    }
+
+    func testMigrationRetainsKeysWhileAnyCiphertextIsUnresolved() async throws {
+        let database = try AppDatabase.inMemory()
+        let key = SymmetricKey(size: .bits256)
+        _ = try await stageLegacyBody("recoverable", key: key, in: database)
+        let corrupt = try await stageLegacyBody("will be corrupted", key: key, in: database)
+        try await database.writer.write { db in
+            try db.execute(
+                sql: "UPDATE note SET bodyEnc = ? WHERE id = ?",
+                arguments: [Data("not an AES-GCM box".utf8), corrupt.id.uuidString]
+            )
+        }
+        let cleanup = CleanupRecorder()
+
+        await LegacyEncryptedBodies.migrate(
+            in: database,
+            fileKeyURL: nil,
+            keychainKeyProvider: { key },
+            cleanup: { cleanup.record() }
+        )
+
+        XCTAssertFalse(cleanup.wasCalled)
+        let unresolved: Int = try await database.writer.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM note WHERE bodyEnc IS NOT NULL") ?? 0
+        }
+        XCTAssertEqual(unresolved, 1)
     }
 }
 
@@ -199,7 +402,7 @@ final class StickyArchiveTests: XCTestCase {
 
     func testImportArrivesActive() async throws {
         let database = try AppDatabase.inMemory()
-        let store = LocalNoteStore(database: database, key: SymmetricKey(size: .bits256))
+        let store = LocalNoteStore(database: database)
 
         let archived = Note(title: "Old", body: "history", archivedAt: Date())
         let archive = StickyArchive(notes: [StickiedNote(note: archived)])
@@ -250,5 +453,69 @@ final class StickyArchiveTests: XCTestCase {
         XCTAssertNil(prepared.first?.archivedAt)
         XCTAssertNil(prepared.first?.deletedAt)
         XCTAssertFalse(prepared.first?.pinned == true)
+    }
+}
+
+final class TransferRegressionTests: XCTestCase {
+    func testArchiveImportMakesDuplicateIncomingIDsUnique() {
+        let id = UUID()
+        let prepared = TransferService.prepareIncoming(
+            [Note(id: id, title: "One"), Note(id: id, title: "Two")],
+            existingIDs: [],
+            preservesArchiveState: true
+        )
+
+        XCTAssertEqual(prepared.count, 2)
+        XCTAssertEqual(Set(prepared.map(\.id)).count, 2, "both entries must survive subsequent upserts")
+    }
+
+    /// Regression: the archive path preserved every state field verbatim,
+    /// including `deletedAt`. Both stores' `fetch` hides a tombstoned note, so
+    /// a crafted archive imported straight into the library invisibly — the
+    /// user could not tell it apart from an import that failed, and each retry
+    /// appended another hidden copy.
+    func testArchiveImportNeverBringsInATombstone() {
+        let tombstoned = Note(
+            title: "Hidden",
+            pinned: true,
+            archivedAt: Date(timeIntervalSince1970: 1_000),
+            deletedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        let prepared = TransferService.prepareIncoming(
+            [tombstoned],
+            existingIDs: [],
+            preservesArchiveState: true
+        )
+
+        XCTAssertEqual(prepared.count, 1)
+        XCTAssertNil(prepared.first?.deletedAt, "an imported note must be visible")
+        XCTAssertNotNil(
+            prepared.first?.archivedAt,
+            "archived state is still part of the lossless archive contract"
+        )
+        XCTAssertEqual(prepared.first?.pinned, true)
+    }
+
+    func testMarkdownImportDoesNotTreatAPreprocessorDirectiveAsAHeading() {
+        let text = "#include <stdio.h>\nint main(void) {}\n"
+        let note = TransferService.markdownNote(from: Data(text.utf8))
+
+        XCTAssertEqual(note?.title, "")
+        XCTAssertEqual(note?.body, "#include <stdio.h>\nint main(void) {}")
+    }
+
+    func testReadableNoteImportsNormalizeWindowsLineEndings() {
+        let markdown = TransferService.markdownNote(
+            from: Data("# Title\r\n\r\nMarkdown body\r\n".utf8)
+        )
+        XCTAssertEqual(markdown?.title, "Title")
+        XCTAssertEqual(markdown?.body, "Markdown body")
+
+        let plain = TransferService.plainTextNote(
+            from: Data("Plain title\r\n\r\nPlain body\r\n".utf8)
+        )
+        XCTAssertEqual(plain?.title, "Plain title")
+        XCTAssertEqual(plain?.body, "Plain body")
     }
 }

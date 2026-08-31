@@ -18,6 +18,36 @@ scripts/make_app.sh  # assembles build/StickyDeck.app (sandboxed, ad-hoc signed)
 You need macOS 15 or later and a Swift 6 toolchain (Xcode 16+). The only
 dependency is [GRDB](https://github.com/groue/GRDB.swift).
 
+If you have an Apple developer certificate, set `STICKYDECK_SIGN_IDENTITY` and
+`make_app.sh` signs with it instead of ad-hoc:
+
+```bash
+export STICKYDECK_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
+```
+
+## The app icon
+
+`Resources/AppIcon.icns` is generated, not hand-drawn. `scripts/make_icon.swift`
+renders it with CoreGraphics from the app's own palette — the note colours come
+straight out of `NoteColor.fill` — so the icon cannot drift away from what the
+deck actually looks like. Edit the script, re-run it, and commit both files it
+writes:
+
+```bash
+scripts/make_icon.swift  # rewrites Resources/AppIcon.icns and Resources/AppIcon.png
+```
+
+macOS caches app icons aggressively by path, so a rebuilt bundle may keep
+showing the old icon in Finder. `lsregister -f build/StickyDeck.app` (under
+`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/`)
+forces a refresh.
+
+Ad-hoc signing gives the app no stable identity — its designated requirement is
+a hash of the binary, so every rebuild looks to macOS like a different program.
+That is invisible until something keeps per-app state, at which point every
+rebuild starts asking permission for it. Signing with a real identity avoids the
+whole class. It is optional; the app builds and runs without it.
+
 `swift run` works for quick iteration, but several behaviours only appear in
 the assembled bundle — the sandbox, the security-scoped bookmark used by
 sync-folder mode, and the bundled fonts. **Verify anything to do with windows,
@@ -30,7 +60,6 @@ Sources/StickyDeck/
   App/          entry point, settings, status item, app lifecycle
   Models/       Note + the five-colour palette
   Persistence/  GRDB store, the NoteStore protocol, the sync-folder store
-  Crypto/       AES-GCM note cipher, keychain-backed key store
   Deck/         the edge panels: pill, fan, expanded editor (NSPanel + SwiftUI)
   Windows/      All Notes and Archive
   Sticky/       pinned desktop notes
@@ -92,15 +121,21 @@ a saved sync-folder bookmark is not inherited.
 Environment variables, honoured in debug and release builds. They are
 env-gated and do nothing otherwise.
 
+Every hook that writes to the library refuses to run unless
+`STICKYDECK_DEBUG_DATA_DIR` is set to a **non-empty** value, which is the same
+condition `AppDatabase.open` uses to divert to an isolated database. An empty
+string is not an isolated library — it falls through to your real notes.
+
 | Variable | Effect |
 |---|---|
 | `STICKYDECK_DEBUG_DATA_DIR=name` | Use an isolated database under the app's temporary directory |
 | `STICKYDECK_DEBUG_DISABLE_SYNC=1` | Ignore any saved sync-folder bookmark |
-| `STICKYDECK_DEBUG_SEED=1` | Seed an empty database with representative notes |
+| `STICKYDECK_DEBUG_SEED=1` | Seed an empty database with representative notes. Requires a non-empty `STICKYDECK_DEBUG_DATA_DIR` |
 | `STICKYDECK_DEBUG_FAN=1` | Open the deck fan on launch, with hover-collapse suspended |
 | `STICKYDECK_DEBUG_EXPAND=1` | Also expand the first note |
 | `STICKYDECK_DEBUG_ALL_NOTES=1` | Open the All Notes window on launch |
-| `STICKYDECK_DEBUG_AUTOSAVE=1` | Simulate typing bursts to check editor focus survives autosaves. Requires `STICKYDECK_DEBUG_DATA_DIR`, because it overwrites a note's body repeatedly |
+| `STICKYDECK_DEBUG_AUTOSAVE=1` | Simulate typing bursts to check editor focus survives autosaves. Requires a non-empty `STICKYDECK_DEBUG_DATA_DIR`, because it overwrites a note's body repeatedly |
+| `STICKYDECK_DEBUG_PIN=1` | Expand the first note and pin it, for capturing the deck-to-desktop handoff. Requires a non-empty `STICKYDECK_DEBUG_DATA_DIR`, because it pins a real note |
 
 A typical visual-QA run:
 

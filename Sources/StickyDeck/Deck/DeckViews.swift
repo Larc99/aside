@@ -7,10 +7,14 @@ import SwiftUI
 enum DeckCursor {
     private static var owner: AnyHashable?
 
-    static func setPointing(owner newOwner: AnyHashable, active: Bool) {
+    static func setPointing(
+        owner newOwner: AnyHashable,
+        active: Bool,
+        cursor: NSCursor = .pointingHand
+    ) {
         if active {
             if owner == nil {
-                NSCursor.pointingHand.push()
+                cursor.push()
             }
             owner = newOwner
         } else if owner == newOwner {
@@ -29,7 +33,7 @@ enum DeckCursor {
 // MARK: - Pill (rest state)
 
 struct PillView: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
     let screen: NSScreen
     let onHoverDeck: () -> Void
 
@@ -58,15 +62,31 @@ struct PillView: View {
 /// final in-panel morph frame. Sharing this surface makes the window handoff
 /// pixel-identical instead of asking two implementations to stay in sync.
 struct PillSurface: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
     let height: CGFloat
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         ZStack {
-            Capsule()
-                .fill(Color(white: 0.16).opacity(reduceTransparency ? 0.82 : 0.52))
-                .shadow(color: .black.opacity(0.22), radius: 4, x: -1.5, y: 1)
+            // The resting pill is the app's one always-visible element: a dark
+            // object carrying pastel chips, which has to stay legible over any
+            // wallpaper. Untinted Liquid Glass samples the backdrop, so on a
+            // light desktop the pill would wash out and take the chips'
+            // contrast with it. On macOS 26 it becomes *tinted* dark glass —
+            // the same object as before, with real depth and refraction.
+            Group {
+                if #available(macOS 26.0, *), !reduceTransparency {
+                    Capsule()
+                        .fill(.clear)
+                        .glassEffect(.regular.tint(Color(white: 0.16)), in: Capsule())
+                } else {
+                    // macOS 15, and Reduce Transparency on any version, which
+                    // must never reach the glass branch.
+                    Capsule()
+                        .fill(Color(white: 0.16).opacity(reduceTransparency ? 0.82 : 0.52))
+                }
+            }
+            .shadow(color: .black.opacity(0.22), radius: 4, x: -1.5, y: 1)
 
             VStack(spacing: DeckMetrics.pillChipGap) {
                 if viewModel.deckNotes.isEmpty {
@@ -89,7 +109,7 @@ struct PillSurface: View {
 // MARK: - Fan (hover state)
 
 struct FanView: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
     var selectedID: UUID?
     @State private var pageStart = 0
     @FocusState private var keyboardFocusedNoteID: UUID?
@@ -137,6 +157,7 @@ struct FanView: View {
                                 viewModel.setPeek(note.id, hovering: hovering)
                             },
                             onTogglePin: { viewModel.togglePin(of: note.id) },
+                            onCycleColor: { viewModel.cycleColor(of: note.id) },
                             onSetColor: { viewModel.setColor($0, of: note.id) },
                             onDuplicate: { viewModel.duplicate(note.id) },
                             onDelete: { viewModel.deleteWithUndo(note.id) }
@@ -258,10 +279,15 @@ private struct ScrollWheelMonitor: NSViewRepresentable {
         coordinator.uninstall()
     }
 
+    @MainActor
     final class Coordinator {
         weak var view: NSView?
         var onScroll: (CGFloat) -> Void
-        private var monitor: Any?
+        // AppKit exposes monitor tokens as type-erased `Any`, so Swift cannot
+        // prove they are safe to read from a global-actor deinitializer.
+        // Installation, explicit removal and Coordinator destruction all
+        // happen through this NSViewRepresentable's main-thread lifecycle.
+        nonisolated(unsafe) private var monitor: Any?
         private var lastPageChange = Date.distantPast
 
         init(onScroll: @escaping (CGFloat) -> Void) {
@@ -270,17 +296,37 @@ private struct ScrollWheelMonitor: NSViewRepresentable {
 
         func install() {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, let view, event.window === view.window else { return event }
-                let point = view.convert(event.locationInWindow, from: nil)
-                guard view.bounds.contains(point), abs(event.scrollingDeltaY) > 1 else { return event }
-                // A single trackpad gesture emits a burst of momentum events.
-                // Page once per deliberate gesture instead of cycling through
-                // the entire deck before the user's fingers come to rest.
-                guard Date().timeIntervalSince(lastPageChange) >= 0.28 else { return event }
-                lastPageChange = Date()
-                onScroll(event.scrollingDeltaY)
+                // The imported callback is Sendable even though NSEvent and
+                // NSView are AppKit main-thread types. Copy only value data
+                // out of the callback, then inspect view state on MainActor.
+                let windowNumber = event.window?.windowNumber
+                let location = event.locationInWindow
+                let delta = event.scrollingDeltaY
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleScroll(
+                        windowNumber: windowNumber,
+                        locationInWindow: location,
+                        delta: delta
+                    )
+                }
                 return event
             }
+        }
+
+        private func handleScroll(
+            windowNumber: Int?,
+            locationInWindow: CGPoint,
+            delta: CGFloat
+        ) {
+            guard let view, windowNumber == view.window?.windowNumber else { return }
+            let point = view.convert(locationInWindow, from: nil)
+            guard view.bounds.contains(point), abs(delta) > 1 else { return }
+            // A single trackpad gesture emits a burst of momentum events.
+            // Page once per deliberate gesture instead of cycling through the
+            // entire deck before the user's fingers come to rest.
+            guard Date().timeIntervalSince(lastPageChange) >= 0.28 else { return }
+            lastPageChange = Date()
+            onScroll(delta)
         }
 
         func uninstall() {
@@ -288,7 +334,9 @@ private struct ScrollWheelMonitor: NSViewRepresentable {
             monitor = nil
         }
 
-        deinit { uninstall() }
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
     }
 }
 
@@ -313,6 +361,7 @@ struct DeckTabView: View {
     let action: () -> Void
     let onHoverChanged: (Bool) -> Void
     var onTogglePin: (() -> Void)?
+    var onCycleColor: (() -> Void)?
     var onSetColor: ((Int) -> Void)?
     var onDuplicate: (() -> Void)?
     var onDelete: (() -> Void)?
@@ -436,6 +485,7 @@ struct DeckTabView: View {
             isPinned: note.pinned,
             open: action,
             togglePin: { onTogglePin?() },
+            cycleColor: { onCycleColor?() },
             duplicate: { onDuplicate?() },
             delete: { onDelete?() }
         ))
@@ -523,6 +573,7 @@ private struct DeckTabAccessibility: ViewModifier {
     let isPinned: Bool
     let open: () -> Void
     let togglePin: () -> Void
+    let cycleColor: () -> Void
     let duplicate: () -> Void
     let delete: () -> Void
 
@@ -534,6 +585,7 @@ private struct DeckTabAccessibility: ViewModifier {
             .accessibilityAction { open() }
             .accessibilityAction(named: "Open note") { open() }
             .accessibilityAction(named: isPinned ? "Unpin note" : "Pin note") { togglePin() }
+            .accessibilityAction(named: "Next color") { cycleColor() }
             .accessibilityAction(named: "Duplicate note") { duplicate() }
             .accessibilityAction(named: "Delete note") { delete() }
     }
@@ -623,7 +675,7 @@ struct EmptyDeckTile: View {
 // MARK: - Expanded note editor
 
 struct ExpandedNoteView: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
     let note: Note
     /// False while the editor is mounted but translated off-screen. The
     /// subtree stays alive for a fast open, so its shortcuts and saves have to
@@ -659,7 +711,7 @@ struct ExpandedNoteView: View {
         .onChange(of: note.id) { loadDraft() }
         .onChange(of: note.updatedAt) { adoptExternalChangeIfSafe() }
         .onChange(of: title) { scheduleSave() }
-        .onChange(of: body_) { scheduleSave() }
+        .onChange(of: body_) { scheduleSave(bodyWasEdited: true) }
         .onExitCommand { viewModel.closeNote() }
         // ⌘. cycles the open note's color (README shortcut table). A hidden
         // button carries the shortcut the same way Esc does.
@@ -681,9 +733,15 @@ struct ExpandedNoteView: View {
         .contextMenu { editorMenu }
     }
 
-    private func scheduleSave() {
+    private func scheduleSave(bodyWasEdited: Bool = false) {
         guard !isLoadingDraft, isActive, viewModel.state == .expanded(note.id) else { return }
-        viewModel.saveDraft(id: note.id, title: title, body: body_, tag: note.tag)
+        viewModel.saveDraft(
+            id: note.id,
+            title: title,
+            body: body_,
+            tag: note.tag,
+            bodyWasEdited: bodyWasEdited
+        )
     }
 
     /// Pin / archive / delete rewrite the note and drop it out of `deckNotes`,
@@ -691,7 +749,12 @@ struct ExpandedNoteView: View {
     /// discard the last few hundred milliseconds of typing.
     private func performAfterFlush(_ action: @escaping () -> Void) {
         Task {
-            await viewModel.flushDraft(id: note.id, title: title, body: body_, tag: note.tag)
+            guard await viewModel.flushDraft(
+                id: note.id,
+                title: title,
+                body: body_,
+                tag: note.tag
+            ) else { return }
             action()
         }
     }
@@ -724,18 +787,20 @@ struct ExpandedNoteView: View {
     private var editorMenu: some View {
         Menu {
             ForEach(NoteColor.allCases, id: \.self) { color in
-                Button(color.name) { viewModel.setColor(color.rawValue, of: note.id) }
+                Button(color.name) {
+                    performAfterFlush { viewModel.setColor(color.rawValue, of: note.id) }
+                }
             }
         } label: {
             Label("Color", systemImage: "paintpalette")
         }
         Button {
-            viewModel.togglePin(of: note.id)
+            performAfterFlush { viewModel.togglePin(of: note.id) }
         } label: {
             Label(note.pinned ? "Unpin" : "Pin", systemImage: note.pinned ? "pin.slash" : "pin")
         }
         Button {
-            viewModel.duplicate(note.id)
+            performAfterFlush { viewModel.duplicate(note.id) }
         } label: {
             Label("Duplicate", systemImage: "plus.square.on.square")
         }
@@ -759,7 +824,7 @@ struct ExpandedNoteView: View {
             Label("Show Archive…", systemImage: "archivebox")
         }
         Button(role: .destructive) {
-            viewModel.deleteWithUndo(note.id)
+            performAfterFlush { viewModel.deleteWithUndo(note.id) }
         } label: {
             Label("Delete", systemImage: "trash")
         }
@@ -908,15 +973,43 @@ struct NoteEditorCard: View {
     @ViewBuilder
     private var editorDragHandle: some View {
         ZStack {
-            Circle().fill(.black.opacity(0.10)).frame(width: 9, height: 9)
+            // Three bars, not a disc. Two identical dots in a card's top-left
+            // corner is the traffic-light idiom, which promises close/minimise;
+            // this one is a drag grip, and a solid circle gave no hint of that.
+            // Same 9x9 footprint, so nothing around it moves.
+            VStack(spacing: 1.6) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Capsule().fill(.black.opacity(0.16)).frame(width: 9, height: 1.3)
+                }
+            }
+            .frame(width: 9, height: 9)
             if let onDrag {
                 Color.clear
                     .contentShape(Rectangle())
+                    // `.global`, not the default `.local`: this handle lives
+                    // inside the very card the drag offsets. In local space the
+                    // handle's own coordinate system slides down with the card,
+                    // so each event's translation was measured against a moving
+                    // origin — the card under-tracked the pointer and rubber-
+                    // banded. The window does not move, so global space is a
+                    // stable reference.
                     .gesture(
-                        DragGesture(minimumDistance: 3)
+                        DragGesture(minimumDistance: 3, coordinateSpace: .global)
                             .onChanged { onDrag($0.translation.height) }
                             .onEnded { _ in onDragEnd?() }
                     )
+                    // The pinned sticky's identical dot has shown an open hand
+                    // since it is an AppKit drag view with a cursor rect. In
+                    // the deck the same dot offered no cursor at all, so the
+                    // only thing distinguishing a drag grip from the close
+                    // button beside it was a tooltip. Routed through
+                    // DeckCursor so a collapse mid-hover cannot strand it.
+                    .onHover {
+                        DeckCursor.setPointing(owner: "editor-drag", active: $0, cursor: .openHand)
+                    }
+                    .onDisappear {
+                        DeckCursor.setPointing(owner: "editor-drag", active: false, cursor: .openHand)
+                    }
             } else {
                 NativeWindowDragHandle()
             }
@@ -994,8 +1087,10 @@ private struct NativeWindowDragHandle: NSViewRepresentable {
 // MARK: - Undo toast
 
 struct UndoToastView: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @State private var hovered = false
+    @AccessibilityFocusState private var accessibilityFocused: Bool
 
     var body: some View {
         if let pending = viewModel.pendingDelete {
@@ -1010,29 +1105,45 @@ struct UndoToastView: View {
                     viewModel.undoDelete()
                 }
                 .buttonStyle(.bordered)
+                .keyboardShortcut("z", modifiers: .command)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background {
                 if reduceTransparency {
                     RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .windowBackgroundColor))
+                } else if #available(macOS 26.0, *) {
+                    // Glass needs macOS 26; the material fallback keeps macOS 15 identical.
+                    Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
                 } else {
+                    // Pre-26 fallback (Reduce Transparency is handled above, before glass).
                     RoundedRectangle(cornerRadius: 10).fill(.ultraThinMaterial)
                 }
             }
             .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
             .transition(.move(edge: .bottom).combined(with: .opacity))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Deleted \(label). Undo available.")
+            .accessibilityFocused($accessibilityFocused)
             // No timer here: the view model owns expiry. This used to run a
             // second, competing `Task.sleep` with no cancellation guard, so a
             // replacing delete resumed the cancelled task and instantly purged
             // the *new* note.
             .onHover { hovering in
-                if hovering {
-                    viewModel.pausePendingDeleteExpiry()
-                } else {
-                    viewModel.resumePendingDeleteExpiry()
-                }
+                hovered = hovering
+                updateExpiryPause()
             }
+            .onChange(of: accessibilityFocused) { _, _ in
+                updateExpiryPause()
+            }
+        }
+    }
+
+    private func updateExpiryPause() {
+        if hovered || accessibilityFocused {
+            viewModel.pausePendingDeleteExpiry()
+        } else {
+            viewModel.resumePendingDeleteExpiry()
         }
     }
 }
@@ -1040,7 +1151,7 @@ struct UndoToastView: View {
 // MARK: - Shared menu
 
 struct DeckMenu: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
 
     var body: some View {
         Button {
@@ -1100,8 +1211,24 @@ struct DeckMenu: View {
 
 // MARK: - Root
 
+/// Applies the card's vertical drag offset in a view of its own.
+///
+/// `cardOffsetY` changes on every frame of a drag. Read directly in
+/// `DeckView.body` it invalidated the entire deck each frame — the fan and all
+/// its tabs, the editor with its live `TextEditor`, the undo toast — which is
+/// what made dragging a note feel heavy. Reading it here means Observation
+/// re-evaluates only this wrapper, and the card it was handed is reused as-is.
+private struct CardDragOffset<Content: View>: View {
+    let viewModel: DeckViewModel
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content.offset(y: viewModel.cardOffsetY)
+    }
+}
+
 struct DeckView: View {
-    @ObservedObject var viewModel: DeckViewModel
+    let viewModel: DeckViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isRightEdge: Bool { viewModel.edge == .right }
@@ -1143,9 +1270,10 @@ struct DeckView: View {
             // dormant. Opening and closing are only rigid translations from
             // behind the physical screen edge.
             if let note = presentedNote {
-                editorLayer(note: note, isActive: isExpanded)
-                    .offset(x: isExpanded ? 0 : hiddenEditorOffset)
-                    .offset(y: viewModel.cardOffsetY)
+                CardDragOffset(viewModel: viewModel) {
+                    editorLayer(note: note, isActive: isExpanded)
+                        .offset(x: isExpanded ? 0 : hiddenEditorOffset)
+                }
                     .animation(
                         DeckInteraction.noteMorphAnimation(reduceMotion: reduceMotion),
                         value: isExpanded

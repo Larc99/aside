@@ -1,3 +1,4 @@
+import AppKit
 import CoreText
 import Foundation
 import SwiftUI
@@ -42,13 +43,12 @@ enum FontLoader {
 
 /// Shared visual language for note surfaces.
 enum NoteTheme {
+    /// Reads through `AppAppearance` rather than `AppSettings` so that a view
+    /// using this font is invalidated by Observation when the user changes the
+    /// typeface, instead of needing a hand-written change broadcast.
+    @MainActor
     static var bodyFont: Font {
-        let name = AppSettings.noteFontName
-        let size = AppSettings.noteFontSize
-        guard !name.isEmpty else {
-            return .system(size: size, weight: .regular, design: .rounded)
-        }
-        return .custom(name, size: size)
+        AppAppearance.shared.bodyFont
     }
 
     static var titleFont: Font {
@@ -71,6 +71,35 @@ enum NoteTheme {
             )
     }
 
-    /// Warm paper tint used by list windows.
-    static let paper = Color(red: 245 / 255, green: 244 / 255, blue: 237 / 255)
+    /// Warm paper ground used by the list and onboarding windows.
+    ///
+    /// The light value is the app's original #F5F4ED. In a dark appearance it
+    /// becomes a warm near-black rather than the neutral system window colour,
+    /// so the windows still read as paper next to the pastel note cards.
+    /// Ink on the paper ground: black on light, warm off-white on dark.
+    ///
+    /// Every call site keeps the opacity it was tuned with, so the light
+    /// appearance is pixel-identical to before and the dark one is its mirror.
+    /// Text drawn on a pastel note card is *not* ink — those surfaces stay
+    /// light in both appearances, so they keep their literal black.
+    static let ink = Color(nsColor: NSColor(name: "noteInk") { appearance in
+        appearance.isDark
+            ? NSColor(red: 237 / 255, green: 235 / 255, blue: 228 / 255, alpha: 1)
+            : .black
+    })
+
+    static let paper = Color(nsColor: NSColor(name: "notePaper") { appearance in
+        appearance.isDark
+            ? NSColor(red: 31 / 255, green: 30 / 255, blue: 27 / 255, alpha: 1)
+            : NSColor(red: 245 / 255, green: 244 / 255, blue: 237 / 255, alpha: 1)
+    })
+}
+
+extension NSAppearance {
+    /// True when this appearance is one of the dark variants. `name` alone is
+    /// unreliable — it can be a vibrancy or accessibility variant — so match
+    /// against the two base appearances the way AppKit documents.
+    var isDark: Bool {
+        bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
 }

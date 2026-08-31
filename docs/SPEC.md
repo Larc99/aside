@@ -71,11 +71,11 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
 - Search fields in deck-adjacent UI, All Notes, and Archive.
 
 ## Storage
-1. **Local** — SQLite (GRDB); note *bodies* encrypted at rest (AES-GCM), key in the
-   login keychain. Metadata (title, color, dates) in plaintext columns.
+1. **Local** — SQLite (GRDB) in the sandbox container; all columns plain,
+   bodies included. Encrypting only the body was dropped in 0.3.0 (see
+   SECURITY.md); at-rest protection is FileVault's.
 2. **Sync folder — StickyDeck extension** — optional user-chosen folder (e.g. iCloud Drive): notes written
-   as plain files, one per note, so files sync between Macs; local-only notes stay
-   encrypted on disk. Writes are atomic (temp + rename), filename = `<uuid>.md`
+   as plain files, one per note, so files sync between Macs. Writes are atomic (temp + rename), filename = `<uuid>.md`
    with a versioned frontmatter block (`stickyDeck: 1`; files written under the
    app's earlier names carry `aside: 1` or `edgeNotes: 1` and are still read,
    since they live in the user's folder and outlive a rename); conflict policy =
@@ -148,6 +148,5 @@ Sticky notes docked to a screen edge. Three states, one pointer movement:
   reviewed against. Treat it as intentional rather than as drift to correct.
 
 ## Privacy
-- Local-only storage, encrypted bodies, no analytics, no third-party SDKs
-  beyond GRDB. If an updater is added, the privacy copy must identify its network access.
+- Local-only storage, no analytics, no third-party SDKs beyond GRDB. If an updater is added, the privacy copy must identify its network access.
 - Sandboxed; only file access is user-chosen export/import/folder.

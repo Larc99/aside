@@ -18,8 +18,10 @@ the app's original scope.
 2. Every UI surface talks to the `NoteStore` protocol. `StoreHub` is the stable
    store captured by views and forwards to either `LocalNoteStore` or
    `SyncNoteStore`.
-3. `LocalNoteStore` persists metadata in GRDB/SQLite and encrypts note bodies
-   with AES-GCM. `KeyStore` owns the login-keychain key.
+3. `LocalNoteStore` persists notes in GRDB/SQLite as plain rows.
+   `LegacyEncryptedBodies` is a one-shot launch pass that rescues bodies left
+   encrypted by 0.2.0 and earlier; delete it, and the `bodyEnc` column, once no
+   install can still be carrying ciphertext.
 4. `DeckController` owns one dormant `PillPanel` per display and one movable
    `DeckPanel`. `DeckViewModel` owns the pill/fan/expanded state machine,
    debounced saves, note actions, and the remembered editor offset.
@@ -37,14 +39,11 @@ echo so the editor does not lose first responder.
 
 ## Current verification baseline
 
-- `swift test`: 100 tests passing (no flakes across repeated runs, including
-  under CPU contention).
-- `swift build`: no compiler warnings. Under the non-default
-  `-strict-concurrency=complete` the package still reports ~66 warnings
-  (it ships in Swift 5 language mode); this is down from 68 but is not clean,
-  and is the main obstacle to a future Swift 6 language-mode migration.
-- `scripts/make_app.sh`: production build, sandbox signing, and app assembly
-  passing.
+- `swift test`: 143 tests passing in Swift 6 language mode.
+- `swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`:
+  passing with no compiler warnings.
+- `STICKYDECK_UNIVERSAL=1 scripts/make_app.sh`: arm64 and x86_64 production
+  builds, sandbox signing, resources, entitlements, and app assembly passing.
 - Debug/visual runs can isolate their database with the documented
   `STICKYDECK_DEBUG_*` variables; a relative data-dir name resolves inside the
   sandbox temporary directory and never touches the normal note library.
@@ -57,10 +56,8 @@ echo so the editor does not lose first responder.
 2. Add an update mechanism now that there is a public repository to release
    from. This is the largest remaining gap.
 3. Decide whether sync-folder mode belongs in the default product surface. It
-   is well tested, but it changes the privacy model from encrypted SQLite to
-   plaintext Markdown.
-4. Replace the hard-coded bundle version in `scripts/make_app.sh` with release
-   metadata before publishing builds.
+   is well tested, but it moves note bodies out of the sandbox container and
+   into a folder that is usually a cloud drive.
 
 ## Maintenance rules
 

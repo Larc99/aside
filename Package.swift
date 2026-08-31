@@ -18,7 +18,7 @@ let package = Package(
             resources: [
                 .copy("Resources/Fonts")
             ],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "StickyDeckTests",
@@ -26,7 +26,7 @@ let package = Package(
                 .target(name: "StickyDeck"),
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]
 )

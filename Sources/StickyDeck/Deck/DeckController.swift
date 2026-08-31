@@ -10,6 +10,7 @@ final class DeckController {
     private var pillPanels: [String: PillPanel] = [:]
     private var currentScreen: NSScreen?
     private var cancellables = Set<AnyCancellable>()
+    private var observers: [any ChangeObservation] = []
     private var panelRetractionID: UUID?
     /// False between session-resign and session-become-active. Relayout is
     /// suppressed while false so the deck cannot re-show itself on the login
@@ -24,66 +25,53 @@ final class DeckController {
         let hostingView = PassThroughHostingView(rootView: DeckView(viewModel: viewModel))
         deckPanel.contentView = hostingView
 
-        viewModel.$state
-            .receive(on: DispatchQueue.main)
-            .dropFirst()
-            .sink { [weak self] _ in
-                // Only reset text focus on state transitions — data-driven
-                // relayouts (autosave reloads, store swaps) must not steal
-                // focus from the open editor mid-typing.
-                self?.deckPanel.makeFirstResponder(nil)
-                self?.relayout(animated: true, reason: .stateChange)
+        // The view model is observed rather than subscribed to: it is an
+        // `@Observable` type with no Combine publishers. `ChangeObserver`
+        // keeps the delivery semantics these subscriptions had — asynchronous
+        // on the main actor, with the same duplicate handling.
+        observers.append(ChangeObserver(
+            skippingDuplicates: false,
+            reading: { [viewModel] in viewModel.state }
+        ) { [weak self] _ in
+            // Only reset text focus on state transitions — data-driven
+            // relayouts (autosave reloads, store swaps) must not steal
+            // focus from the open editor mid-typing.
+            self?.deckPanel.makeFirstResponder(nil)
+            self?.relayout(animated: true, reason: .stateChange)
+        })
+        observers.append(ChangeObserver(reading: { [viewModel] in viewModel.deckNotes }) { [weak self] _ in
+            self?.relayout(animated: false, reason: .dataChange)
+            if ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_AUTOSAVE"] == "1",
+               let panel = NSApp.windows.first(where: { $0 is DeckPanel }) {
+                NSLog("StickyDeck post-relayout responder: %@ visible=%d key=%d",
+                      String(describing: type(of: panel.firstResponder)),
+                      panel.isVisible ? 1 : 0,
+                      panel.isKeyWindow ? 1 : 0)
             }
-            .store(in: &cancellables)
-        viewModel.$deckNotes
-            .receive(on: DispatchQueue.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.relayout(animated: false, reason: .dataChange)
-                if ProcessInfo.processInfo.environment["STICKYDECK_DEBUG_AUTOSAVE"] == "1",
-                   let panel = NSApp.windows.first(where: { $0 is DeckPanel }) {
-                    NSLog("StickyDeck post-relayout responder: %@ visible=%d key=%d",
-                          String(describing: type(of: panel.firstResponder)),
-                          panel.isVisible ? 1 : 0,
-                          panel.isKeyWindow ? 1 : 0)
-                }
-            }
-            .store(in: &cancellables)
+        })
         // The undo toast lives outside the fan/card content rects; hit
         // testing must be refreshed whenever it appears or disappears, or
         // the Undo button is click-through.
-        viewModel.$pendingDelete
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self, self.viewModel.state != .pill else { return }
-                self.updateHitRects()
-            }
-            .store(in: &cancellables)
-        viewModel.$cardOffsetY
-            .receive(on: DispatchQueue.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                guard let self, case .expanded = self.viewModel.state else { return }
-                self.updateHitRects()
-            }
-            .store(in: &cancellables)
-        viewModel.$peekedNoteID
-            .receive(on: DispatchQueue.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                guard let self, self.viewModel.state == .fan else { return }
-                self.updateHitRects()
-            }
-            .store(in: &cancellables)
+        observers.append(ChangeObserver(
+            skippingDuplicates: false,
+            reading: { [viewModel] in viewModel.pendingDelete }
+        ) { [weak self] _ in
+            guard let self, self.viewModel.state != .pill else { return }
+            self.updateHitRects()
+        })
+        observers.append(ChangeObserver(reading: { [viewModel] in viewModel.cardOffsetY }) { [weak self] _ in
+            guard let self, case .expanded = self.viewModel.state else { return }
+            self.updateHitRects()
+        })
+        observers.append(ChangeObserver(reading: { [viewModel] in viewModel.peekedNoteID }) { [weak self] _ in
+            guard let self, self.viewModel.state == .fan else { return }
+            self.updateHitRects()
+        })
         // Paging changes how many tabs are drawn, which changes the fan rect.
-        viewModel.$drawnTabCount
-            .receive(on: DispatchQueue.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                guard let self, self.viewModel.state != .pill else { return }
-                self.updateHitRects()
-            }
-            .store(in: &cancellables)
+        observers.append(ChangeObserver(reading: { [viewModel] in viewModel.drawnTabCount }) { [weak self] _ in
+            guard let self, self.viewModel.state != .pill else { return }
+            self.updateHitRects()
+        })
 
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .receive(on: DispatchQueue.main)

@@ -61,6 +61,13 @@ final class DeckMetricsTests: XCTestCase {
         XCTAssertGreaterThan(DeckMetrics.pillDashHeight, DeckMetrics.pillDashWidth)
     }
 
+    func testPillHonorsTheMinimumHeightWithNoNotes() {
+        XCTAssertEqual(
+            DeckMetrics.pillHeight(noteCount: 0, maximumHeight: 1_000),
+            36
+        )
+    }
+
     func testLiveMeasuredDeckDimensions() {
         XCTAssertEqual(DeckMetrics.tabWidth, 40)
         XCTAssertEqual(DeckMetrics.peekWidth, 192)

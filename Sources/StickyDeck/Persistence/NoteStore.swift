@@ -1,9 +1,17 @@
 import Foundation
-import CryptoKit
 import GRDB
 
-/// Persistence abstraction. The local store keeps bodies AES-GCM-encrypted at
-/// rest; the optional sync-folder store writes plain files instead.
+/// Identifies one specific tombstone generation. Undo and expiry must carry
+/// this value back to the store: an older UI owner must never restore or purge
+/// a note that was subsequently restored and deleted again elsewhere.
+struct DeletionToken: Sendable, Equatable {
+    let noteID: UUID
+    let deletedAt: Date
+}
+
+/// Persistence abstraction. Both stores keep bodies as plain text — the local
+/// one in SQLite inside the app's sandbox container, the optional sync-folder
+/// one as Markdown files in a folder the user chose.
 protocol NoteStore: Sendable {
     func fetch(filter: NoteFilter, query: String) async throws -> [Note]
     /// Every id the store knows about, *including* soft-deleted rows that
@@ -11,9 +19,28 @@ protocol NoteStore: Sendable {
     /// appends a copy instead of silently overwriting and un-deleting it.
     func allKnownIDs() async throws -> Set<UUID>
     func upsert(_ note: Note) async throws
-    func softDelete(id: UUID) async throws
-    func restore(id: UUID) async throws
-    func purge(id: UUID) async throws
+    /// Atomically changes the current live copy of one note. Returns false
+    /// when the note was deleted, purged, or the closure made no change.
+    ///
+    /// Editors use this instead of a fetch followed by an upsert: another
+    /// task can delete a note (or swap StoreHub's backing library) at either
+    /// suspension point in that two-call sequence.
+    @discardableResult
+    func mutate(
+        id: UUID,
+        _ change: @Sendable (inout Note) -> Void
+    ) async throws -> Bool
+    /// Tombstones a live note and returns the exact generation written. Returns
+    /// nil when the note is missing or already tombstoned, so two surfaces
+    /// cannot both claim ownership of the same deletion.
+    @discardableResult
+    func softDelete(id: UUID) async throws -> DeletionToken?
+    /// Restores only the tombstone represented by `token`.
+    @discardableResult
+    func restore(_ token: DeletionToken) async throws -> Bool
+    /// Permanently removes only the tombstone represented by `token`.
+    @discardableResult
+    func purge(_ token: DeletionToken) async throws -> Bool
 }
 
 enum NoteStoreError: Error, LocalizedError {
@@ -46,32 +73,28 @@ enum NoteContentWriter {
     /// notification, so arming unconditionally swallowed the next genuine one.
     @discardableResult
     static func saveContent(_ draft: Note, to store: any NoteStore) async throws -> Bool {
-        let live = try await store.fetch(filter: .all, query: "")
-        // A note missing here was purged or soft-deleted while we were typing.
-        // Dropping the write is deliberate: it must not resurrect.
-        guard var note = live.first(where: { $0.id == draft.id }) else { return false }
-
-        // A body we could not decrypt stays untouched unless the user actually
-        // typed something, so an incidental save cannot erase the ciphertext.
-        if note.bodyUnavailable && draft.body.isEmpty {
-            guard note.title != draft.title
-                    || note.colorIndex != draft.colorIndex
-                    || note.tag != draft.tag else { return false }
-        } else {
-            guard note.title != draft.title
-                    || note.body != draft.body
-                    || note.colorIndex != draft.colorIndex
-                    || note.tag != draft.tag else { return false }
-            note.body = draft.body
-            note.bodyUnavailable = false
+        try await store.mutate(id: draft.id) { note in
+            note.title = draft.title
+            if !draft.bodyNeedsMigration || !draft.body.isEmpty {
+                note.body = draft.body
+                note.bodyNeedsMigration = false
+            }
+            note.colorIndex = draft.colorIndex
+            note.tag = draft.tag
         }
+    }
 
-        note.title = draft.title
-        note.colorIndex = draft.colorIndex
-        note.tag = draft.tag
-        note.updatedAt = Date()
-        try await store.upsert(note)
-        return true
+    /// The All Notes preview edits only the body. Giving that surface the
+    /// broader content writer let its stale row snapshot roll back a newer
+    /// title, colour or tag chosen in the deck/sticky while the debounce sat.
+    @discardableResult
+    static func saveBody(_ draft: Note, to store: any NoteStore) async throws -> Bool {
+        try await store.mutate(id: draft.id) { note in
+            if !draft.bodyNeedsMigration || !draft.body.isEmpty {
+                note.body = draft.body
+                note.bodyNeedsMigration = false
+            }
+        }
     }
 
     /// Applies a state change (pin, archive, colour) onto the note as the store
@@ -85,32 +108,27 @@ enum NoteContentWriter {
         to id: UUID,
         from draft: Note?,
         in store: any NoteStore,
-        _ change: (inout Note) -> Void
+        _ change: @Sendable (inout Note) -> Void
     ) async throws -> Bool {
-        let live = try await store.fetch(filter: .all, query: "")
-        guard var note = live.first(where: { $0.id == id }) else { return false }
-        if let draft {
-            note.title = draft.title
-            if !note.bodyUnavailable || !draft.body.isEmpty {
-                note.body = draft.body
-                note.bodyUnavailable = false
+        try await store.mutate(id: id) { note in
+            if let draft {
+                note.title = draft.title
+                if !draft.bodyNeedsMigration || !draft.body.isEmpty {
+                    note.body = draft.body
+                    note.bodyNeedsMigration = false
+                }
+                note.tag = draft.tag
             }
-            note.tag = draft.tag
+            change(&note)
         }
-        change(&note)
-        note.updatedAt = Date()
-        try await store.upsert(note)
-        return true
     }
 }
 
 struct LocalNoteStore: NoteStore {
     private let database: AppDatabase
-    private let key: SymmetricKey
 
-    init(database: AppDatabase, key: SymmetricKey) {
+    init(database: AppDatabase) {
         self.database = database
-        self.key = key
     }
 
     func fetch(filter: NoteFilter, query: String) async throws -> [Note] {
@@ -124,60 +142,12 @@ struct LocalNoteStore: NoteStore {
             try NoteRecord.fetchAll(db, sql: sql)
         }
 
-        var notes: [Note] = []
-        for record in records {
-            do {
-                notes.append(try NoteMapper.note(from: record, key: key))
-            } catch {
-                // Body encrypted under an older key. Keep the row's metadata
-                // with an empty body — recovery runs as a background pass
-                // (recoverUndecryptableRows), and a damaged row must never
-                // blank the whole list. The `bodyUnavailable` marker keeps a
-                // later save from writing the placeholder back over the
-                // ciphertext.
-                notes.append(NoteMapper.noteSkippingBody(from: record))
-            }
-        }
+        var notes = try records.map(NoteMapper.note(from:))
 
         if !query.isEmpty {
             notes = notes.filter { $0.matches(query: query) }
         }
         return notes
-    }
-
-    /// One-shot per launch: re-reads rows whose body cannot be decrypted with
-    /// the current key and tries the legacy keychain key. Runs entirely off
-    /// the main thread — the consent prompt (if any) can take its time. On
-    /// success rows are re-encrypted under the current key and the change is
-    /// broadcast so the UI refreshes.
-    func recoverUndecryptableRows() async {
-        let records = (try? await database.writer.read { db in
-            // Unfiltered: a soft-deleted note can still be restored, so its
-            // body has to be recovered too.
-            try NoteRecord.fetchAll(db, sql: "SELECT * FROM note")
-        }) ?? []
-
-        var damaged: [NoteRecord] = []
-        for record in records {
-            if (try? NoteMapper.note(from: record, key: key)) == nil {
-                damaged.append(record)
-            }
-        }
-        guard !damaged.isEmpty else { return }
-
-        guard let legacy = KeyStore.legacyKeychainKey() else { return }
-
-        for record in damaged {
-            guard let recovered = try? NoteMapper.note(from: record, key: legacy) else { continue }
-            try? await database.writer.write { db in
-                // Built inside the write closure: record mutation stays
-                // confined to the database write (Swift 6 sendability).
-                if let reencrypted = try? NoteMapper.record(from: recovered, key: key) {
-                    try reencrypted.update(db)
-                }
-            }
-        }
-        NotificationCenter.default.post(name: .noteStoreChanged, object: nil)
     }
 
     func allKnownIDs() async throws -> Set<UUID> {
@@ -190,49 +160,108 @@ struct LocalNoteStore: NoteStore {
 
     func upsert(_ note: Note) async throws {
         try await database.writer.write { db in
-            var record = try NoteMapper.record(from: note, key: key)
-            if note.bodyUnavailable {
-                // We could not read this body, so we are not entitled to
-                // replace it. Encrypting the placeholder would write NULL and
-                // destroy content the recovery pass can still rescue.
-                record.bodyEnc = try NoteRecord
-                    .filter(key: note.id.uuidString)
-                    .fetchOne(db)?
-                    .bodyEnc
+            var record = NoteMapper.record(from: note)
+            if note.bodyNeedsMigration,
+               let existing = try NoteRecord
+                .filter(key: note.id.uuidString)
+                .fetchOne(db) {
+                // A pre-migration UI snapshot owns no body text. Preserve
+                // whichever representation the database has now: ciphertext
+                // if recovery is still pending, or plaintext if it completed
+                // while this draft was open.
+                record.body = existing.body
+                record.bodyEnc = existing.bodyEnc
             }
             try record.save(db)
         }
         postChanged()
     }
 
-    func softDelete(id: UUID) async throws {
-        try await database.writer.write { db in
-            try db.execute(
-                sql: "UPDATE note SET deletedAt = ?, updatedAt = ? WHERE id = ?",
-                arguments: [Date(), Date(), id.uuidString]
-            )
+    func mutate(
+        id: UUID,
+        _ change: @Sendable (inout Note) -> Void
+    ) async throws -> Bool {
+        let didChange = try await database.writer.write { db in
+            guard let existing = try NoteRecord
+                .filter(Column("id") == id.uuidString && Column("deletedAt") == nil)
+                .fetchOne(db) else { return false }
+
+            var note = try NoteMapper.note(from: existing)
+            let original = note
+            change(&note)
+
+            // Identity, creation time and deletion state belong to the store;
+            // callers of this live-note API cannot move or resurrect a row.
+            note.id = original.id
+            note.createdAt = original.createdAt
+            note.deletedAt = original.deletedAt
+            note.updatedAt = original.updatedAt
+            guard note != original else { return false }
+            note.updatedAt = max(Date(), original.updatedAt.addingTimeInterval(0.001))
+
+            var record = NoteMapper.record(from: note)
+            if note.bodyNeedsMigration {
+                // A compatibility placeholder still owns no body. Preserve
+                // both representations until migration either recovers it or
+                // a real user edit intentionally replaces it.
+                record.body = existing.body
+                record.bodyEnc = existing.bodyEnc
+            }
+            try record.save(db)
+            return true
         }
-        postChanged()
+        if didChange { postChanged() }
+        return didChange
     }
 
-    func restore(id: UUID) async throws {
-        try await database.writer.write { db in
-            try db.execute(
-                sql: "UPDATE note SET deletedAt = NULL, updatedAt = ? WHERE id = ?",
-                arguments: [Date(), id.uuidString]
-            )
+    func softDelete(id: UUID) async throws -> DeletionToken? {
+        let token = try await database.writer.write { db -> DeletionToken? in
+            guard var record = try NoteRecord
+                .filter(Column("id") == id.uuidString && Column("deletedAt") == nil)
+                .fetchOne(db) else { return nil }
+
+            // Use the same monotonic stamp for both fields. Besides ordering the
+            // tombstone after the live copy, this makes rapid restore/re-delete
+            // cycles produce distinct deletion generations.
+            let deletedAt = max(Date(), record.updatedAt.addingTimeInterval(0.001))
+            record.deletedAt = deletedAt
+            record.updatedAt = deletedAt
+            try record.update(db)
+            return DeletionToken(noteID: id, deletedAt: deletedAt)
         }
-        postChanged()
+        if token != nil { postChanged() }
+        return token
     }
 
-    func purge(id: UUID) async throws {
-        try await database.writer.write { db in
-            try db.execute(
-                sql: "DELETE FROM note WHERE id = ?",
-                arguments: [id.uuidString]
-            )
+    func restore(_ token: DeletionToken) async throws -> Bool {
+        let didRestore = try await database.writer.write { db in
+            guard var record = try NoteRecord
+                .filter(
+                    Column("id") == token.noteID.uuidString
+                        && Column("deletedAt") == token.deletedAt
+                )
+                .fetchOne(db) else { return false }
+
+            record.deletedAt = nil
+            record.updatedAt = max(Date(), record.updatedAt.addingTimeInterval(0.001))
+            try record.update(db)
+            return true
         }
-        postChanged()
+        if didRestore { postChanged() }
+        return didRestore
+    }
+
+    func purge(_ token: DeletionToken) async throws -> Bool {
+        let didPurge = try await database.writer.write { db in
+            try NoteRecord
+                .filter(
+                    Column("id") == token.noteID.uuidString
+                        && Column("deletedAt") == token.deletedAt
+                )
+                .deleteAll(db) > 0
+        }
+        if didPurge { postChanged() }
+        return didPurge
     }
 
     private func postChanged() {

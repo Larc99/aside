@@ -60,6 +60,20 @@ struct AppDatabase {
             try db.create(indexOn: "note", columns: ["updatedAt"])
         }
 
+        // Bodies are stored as plain text: the sync folder always wrote plain
+        // Markdown into the user's own folder, so encrypting only the local
+        // copy — with a key sitting on the same disk — bought nothing and cost
+        // a keychain dependency that could refuse to open the app at all.
+        //
+        // `bodyEnc` deliberately stays: LegacyEncryptedBodies reads it once,
+        // after launch, to rescue rows written by 0.2.0 and earlier. It can be
+        // dropped in a v3 migration once that pass is retired.
+        migrator.registerMigration("v2-plain-bodies") { db in
+            try db.alter(table: "note") { t in
+                t.add(column: "body", .text).notNull().defaults(to: "")
+            }
+        }
+
         return migrator
     }
 }

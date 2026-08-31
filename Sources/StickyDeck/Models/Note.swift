@@ -13,12 +13,12 @@ struct Note: Identifiable, Equatable, Sendable, Hashable {
     var archivedAt: Date?
     var deletedAt: Date?
 
-    /// True when the stored body could not be decrypted, so `body` is a
-    /// placeholder rather than the user's text. Stores must never overwrite
-    /// the stored ciphertext from such a note — an incidental edit (colour,
-    /// pin, archive) would otherwise destroy recoverable content. Never
-    /// persisted; it describes this in-memory copy only.
-    var bodyUnavailable: Bool = false
+    /// True only for an old encrypted row whose plaintext has not been
+    /// recovered yet. A draft loaded in that window carries an empty body, so
+    /// writers use this marker to keep the placeholder from erasing text that
+    /// the background migration recovers moments later. It is transient and
+    /// can disappear with `bodyEnc` after the compatibility migration retires.
+    var bodyNeedsMigration: Bool = false
 
     init(
         id: UUID = UUID(),
@@ -32,7 +32,7 @@ struct Note: Identifiable, Equatable, Sendable, Hashable {
         updatedAt: Date = Date(),
         archivedAt: Date? = nil,
         deletedAt: Date? = nil,
-        bodyUnavailable: Bool = false
+        bodyNeedsMigration: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -45,7 +45,7 @@ struct Note: Identifiable, Equatable, Sendable, Hashable {
         self.updatedAt = updatedAt
         self.archivedAt = archivedAt
         self.deletedAt = deletedAt
-        self.bodyUnavailable = bodyUnavailable
+        self.bodyNeedsMigration = bodyNeedsMigration
     }
 
     var isActive: Bool { archivedAt == nil && deletedAt == nil }

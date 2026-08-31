@@ -48,4 +48,20 @@ final class WindowCoordinator {
         archiveController = controller
         controller.showAndActivate()
     }
+
+    func flushPendingWork() async -> Bool {
+        let allNotesSaved = await allNotesController?.flushPendingWork() ?? true
+        let archiveSaved = await archiveController?.flushPendingWork() ?? true
+        return allNotesSaved && archiveSaved
+    }
+
+    var hasPendingWork: Bool {
+        allNotesController?.hasPendingWork == true
+            || archiveController?.hasPendingWork == true
+    }
+
+    func reloadFromStore() async {
+        await allNotesController?.reload()
+        await archiveController?.reload()
+    }
 }

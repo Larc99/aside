@@ -24,16 +24,28 @@ if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
     echo "       run: git fetch --unshallow --tags" >&2
     exit 1
 fi
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+    echo "error: working tree is not clean. Commit or stash every release input first." >&2
+    exit 1
+fi
 if ! git describe --tags --exact-match HEAD >/dev/null 2>&1; then
     echo "error: HEAD is not tagged. Tag the release commit first, e.g." >&2
     echo "       git tag -a v0.3.0 -m \"StickyDeck 0.3.0\"" >&2
     exit 1
 fi
-echo "==> Releasing $(git describe --tags --exact-match HEAD)"
+RELEASE_TAG="$(git describe --tags --exact-match HEAD)"
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: release tag must be vMAJOR.MINOR.PATCH; got: $RELEASE_TAG" >&2
+    exit 1
+fi
+echo "==> Releasing $RELEASE_TAG"
 
 echo "==> Building and signing as: $STICKYDECK_SIGN_IDENTITY"
-STICKYDECK_SIGN_IDENTITY="$STICKYDECK_SIGN_IDENTITY" scripts/make_app.sh "$OUT_DIR"
+STICKYDECK_UNIVERSAL=1 \
+    STICKYDECK_SIGN_IDENTITY="$STICKYDECK_SIGN_IDENTITY" \
+    scripts/make_app.sh "$OUT_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP"
+lipo "$APP/Contents/MacOS/StickyDeck" -verify_arch arm64 x86_64
 
 echo "==> Submitting for notarization (this usually takes a few minutes)"
 rm -f "$ZIP"

@@ -10,12 +10,14 @@ struct NoteListView: View {
         case archive
     }
 
-    @StateObject private var model: NoteListModel
+    @State private var model: NoteListModel
     @State private var bulkExportShape: ExportShape = .markdownPerNote
     @FocusState private var focusedArea: FocusArea?
     @AccessibilityFocusState private var deleteToastAccessibilityFocused: Bool
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var deleteToastHovered = false
+    @State private var assignedInitialFocus = false
 
     /// Not private: the preview card takes a binding to the same focus state
     /// so Return can move focus from the list into the note body.
@@ -26,7 +28,11 @@ struct NoteListView: View {
     }
 
     init(store: any NoteStore, mode: Mode) {
-        _model = StateObject(wrappedValue: NoteListModel(store: store, mode: mode))
+        _model = State(wrappedValue: NoteListModel(store: store, mode: mode))
+    }
+
+    init(model: NoteListModel) {
+        _model = State(wrappedValue: model)
     }
 
     var body: some View {
@@ -48,7 +54,12 @@ struct NoteListView: View {
             detailPane
         }
         .background(NoteTheme.paper)
-        .task { await model.reload() }
+        .task {
+            await model.reload()
+            guard !assignedInitialFocus else { return }
+            assignedInitialFocus = true
+            focusedArea = model.notes.isEmpty ? .search : .noteList
+        }
         .onDisappear {
             model.flushAutosave()
             // A hovered toast pauses the Undo countdown. If the window closes
@@ -77,9 +88,17 @@ struct NoteListView: View {
             HStack {
                 Text(model.mode == .archive ? "Archive" : "All Notes")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.73))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.73))
                 Spacer()
                 if model.mode == .all {
+                    Button {
+                        Task { await model.createNote() }
+                    } label: {
+                        Label("New Note", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
                     Button(action: importNotes) {
                         Label("Import…", systemImage: "square.and.arrow.down")
                     }
@@ -193,8 +212,12 @@ struct NoteListView: View {
                     // says where focus is, which is what a native list does.
                     .onChange(of: model.focusedID) { _, id in
                         guard let id else { return }
-                        withAnimation(.easeOut(duration: 0.12)) {
+                        if reduceMotion {
                             proxy.scrollTo(id, anchor: .center)
+                        } else {
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
                         }
                     }
                 }
@@ -211,7 +234,7 @@ struct NoteListView: View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12))
-                .foregroundStyle(.black.opacity(0.28))
+                .foregroundStyle(NoteTheme.ink.opacity(0.28))
             TextField(
                 model.mode == .archive ? "Search archived notes" : "Search all notes",
                 text: $model.query
@@ -233,7 +256,7 @@ struct NoteListView: View {
                     model.query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.black.opacity(0.25))
+                        .foregroundStyle(NoteTheme.ink.opacity(0.25))
                         // The glyph alone is a 13x13 target, well under the
                         // 20x20 minimum. The shape grows into the empty gap at
                         // the field's trailing edge and the glyph stays
@@ -250,11 +273,11 @@ struct NoteListView: View {
             Spacer(minLength: 4)
             Text(model.notes.count == 1 ? "1 note" : "\(model.notes.count) notes")
                 .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(.black.opacity(0.36))
+                .foregroundStyle(NoteTheme.ink.opacity(0.36))
         }
         .padding(.horizontal, 10)
         .frame(height: 30)
-        .background(Color.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+        .background(NoteTheme.ink.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
         // Same reason as the list's ring: the field is plain-styled, so
         // without this nothing on screen says the search field has focus.
         .overlay {
@@ -296,40 +319,38 @@ struct NoteListView: View {
         Button(title) { model.filter = filter }
             .buttonStyle(.plain)
             .font(.system(size: 12, weight: model.filter == filter ? .semibold : .regular, design: .rounded))
-            .foregroundStyle(.black.opacity(model.filter == filter ? 0.75 : 0.47))
+            .foregroundStyle(NoteTheme.ink.opacity(model.filter == filter ? 0.75 : 0.47))
             .padding(.horizontal, 10)
             .frame(height: 27)
             .background(
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(model.filter == filter ? Color.black.opacity(0.065) : .clear)
+                    .fill(model.filter == filter ? NoteTheme.ink.opacity(0.065) : .clear)
             )
             .accessibilityAddTraits(model.filter == filter ? .isSelected : [])
     }
 
     private var emptyState: some View {
-        VStack(spacing: 9) {
-            Spacer()
-            Image(systemName: model.mode == .archive ? "archivebox" : "note.text")
-                .font(.system(size: 28))
-                .foregroundStyle(.black.opacity(0.18))
-            Text(model.query.isEmpty
-                 ? (model.mode == .archive ? "Nothing archived yet." : "No notes yet.")
-                 : "No matching notes.")
-                .font(.system(size: 13, design: .rounded))
-                .foregroundStyle(.black.opacity(0.42))
-            Text(emptyStateHint)
-                .font(.system(size: 11, design: .rounded))
-                .foregroundStyle(.black.opacity(0.30))
-            Spacer()
+        Group {
+            if model.query.isEmpty {
+                switch model.mode {
+                case .archive:
+                    ContentUnavailableView(
+                        "Nothing archived yet.",
+                        systemImage: "archivebox",
+                        description: Text("Completed notes appear here.")
+                    )
+                case .all:
+                    ContentUnavailableView(
+                        "No notes yet.",
+                        systemImage: "note.text",
+                        description: Text("Create a note from the menu bar or press ⌥⌘N.")
+                    )
+                }
+            } else {
+                ContentUnavailableView.search(text: model.query)
+            }
         }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var emptyStateHint: String {
-        if !model.query.isEmpty { return "Try a different search." }
-        return model.mode == .archive
-            ? "Completed notes appear here."
-            : "Create a note from the menu bar or press ⌥⌘N."
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func focus(_ id: UUID) {
@@ -373,9 +394,7 @@ struct NoteListView: View {
                     focusArea: $focusedArea,
                     onEditBody: model.mode == .all
                         ? { edited in
-                            var updated = note
-                            updated.body = edited
-                            model.autosave(updated)
+                            model.autosaveBody(edited, for: note)
                         }
                         : nil
                 )
@@ -383,9 +402,9 @@ struct NoteListView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "note.text")
                         .font(.system(size: 28))
-                        .foregroundStyle(.black.opacity(0.17))
+                        .foregroundStyle(NoteTheme.ink.opacity(0.17))
                     Text("Select a note")
-                        .foregroundStyle(.black.opacity(0.40))
+                        .foregroundStyle(NoteTheme.ink.opacity(0.40))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -407,7 +426,7 @@ struct NoteListView: View {
             Text(statusText(for: note))
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .kerning(0.8)
-                .foregroundStyle(.black.opacity(0.44))
+                .foregroundStyle(NoteTheme.ink.opacity(0.44))
                 .lineLimit(2)
                 // The label yields first; the buttons keep their full titles
                 // rather than truncating to "Mark compl…".
@@ -449,7 +468,12 @@ struct NoteListView: View {
         if let archivedAt = note.archivedAt {
             return "ARCHIVED \(archivedAt.formatted(.relative(presentation: .named)))".uppercased()
         }
-        return "ACTIVE · IN\nTHE DECK"
+        // One word. The three buttons beside this label are `fixedSize`, so in
+        // All Notes it is left with roughly 60 pt — "ACTIVE · IN THE DECK"
+        // rewrapped and truncated to a meaningless "ACTIVE / · IN…" there. The
+        // deck membership it used to spell out is already carried by every
+        // row's ACTIVE badge, so the word alone loses nothing.
+        return "ACTIVE"
     }
 
     // MARK: Bulk selection
@@ -459,12 +483,12 @@ struct NoteListView: View {
             HStack {
                 Text("\(model.selectedNotes.count) notes selected")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.67))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.67))
                 Spacer()
                 Button("Clear") { model.clearSelection() }
                     .buttonStyle(.plain)
                     .font(.system(size: 11, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.42))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.42))
             }
             .padding(.horizontal, 20)
             .padding(.top, 18)
@@ -476,7 +500,7 @@ struct NoteListView: View {
             Text("EXPORT AS")
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .kerning(1)
-                .foregroundStyle(.black.opacity(0.38))
+                .foregroundStyle(NoteTheme.ink.opacity(0.38))
                 .padding(.horizontal, 20)
                 .padding(.top, 17)
                 .padding(.bottom, 7)
@@ -510,8 +534,8 @@ struct NoteListView: View {
 
                 Spacer()
 
-                Button("Archive") {
-                    Task { await model.setArchived(model.selection, archived: true) }
+                Button(model.bulkActionArchives ? "Archive" : "Restore") {
+                    Task { await model.setArchived(model.selection, archived: model.bulkActionArchives) }
                 }
                 .buttonStyle(.bordered)
                 Button("Delete", role: .destructive) {
@@ -532,7 +556,7 @@ struct NoteListView: View {
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .lineLimit(1)
                     Text(note.body)
-                        .font(.custom(AppSettings.noteFontName, size: 13))
+                        .font(AppAppearance.shared.bodyFont(size: 13))
                         .lineLimit(2)
                 }
                 .foregroundStyle(.black.opacity(0.72))
@@ -553,7 +577,7 @@ struct NoteListView: View {
             HStack(spacing: 8) {
                 Circle()
                     .fill(bulkExportShape == shape ? NoteColor.amber.fill : .clear)
-                    .overlay(Circle().stroke(.black.opacity(0.20), lineWidth: 1.2))
+                    .overlay(Circle().stroke(NoteTheme.ink.opacity(0.20), lineWidth: 1.2))
                     .overlay {
                         if bulkExportShape == shape {
                             Circle().fill(.black.opacity(0.45)).frame(width: 5, height: 5)
@@ -564,15 +588,15 @@ struct NoteListView: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                 Text(detail)
                     .font(.system(size: 11, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.40))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.40))
                 Spacer()
             }
-            .foregroundStyle(.black.opacity(0.70))
+            .foregroundStyle(NoteTheme.ink.opacity(0.70))
             .padding(.horizontal, 10)
             .frame(height: 35)
             .background(
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(bulkExportShape == shape ? Color.black.opacity(0.055) : .clear)
+                    .fill(bulkExportShape == shape ? NoteTheme.ink.opacity(0.055) : .clear)
             )
             // Both the glyph and the row background are `Color.clear` when the
             // choice is not selected, and clear fills take no clicks: only the
@@ -587,11 +611,14 @@ struct NoteListView: View {
 
     private func export(_ notes: [Note], as shape: ExportShape) {
         guard !notes.isEmpty else { return }
-        Task { await TransferService.export(notes: notes, shape: shape) }
+        Task {
+            guard let fresh = await model.notesForExport(notes), !fresh.isEmpty else { return }
+            await TransferService.export(notes: fresh, shape: shape)
+        }
     }
 
     private func importNotes() {
-        Task { await TransferService.importNotes(into: model.store) }
+        Task { await model.importNotes() }
     }
 
     private func deleteToast(_ pending: NoteListModel.Delete) -> some View {
@@ -615,7 +642,7 @@ struct NoteListView: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(.black.opacity(0.08), lineWidth: 1)
+                .stroke(NoteTheme.ink.opacity(0.08), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.10), radius: 6, y: 2)
         .padding(.bottom, 8)
@@ -672,13 +699,13 @@ struct SelectableNoteRow: View {
                     .fill(isChecked ? NoteColor.at(note.colorIndex).fill : Color.clear)
                     .overlay(
                         RoundedRectangle(cornerRadius: 5)
-                            .stroke(.black.opacity(isChecked ? 0.08 : 0.20), lineWidth: 1.4)
+                            .stroke(NoteTheme.ink.opacity(isChecked ? 0.08 : 0.20), lineWidth: 1.4)
                     )
                     .overlay {
                         if isChecked {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.black.opacity(0.58))
+                                .foregroundStyle(NoteTheme.ink.opacity(0.58))
                         }
                     }
                     .frame(width: 19, height: 19)
@@ -748,13 +775,13 @@ private struct RowSelection {
 
     var fill: Color {
         guard isFocused else { return .clear }
-        if contrast == .increased { return .black.opacity(isKey ? 0.10 : 0.06) }
-        return .black.opacity(isKey ? 0.052 : 0.030)
+        if contrast == .increased { return NoteTheme.ink.opacity(isKey ? 0.10 : 0.06) }
+        return NoteTheme.ink.opacity(isKey ? 0.052 : 0.030)
     }
 
     var outline: Color {
         guard isFocused else { return .clear }
-        return isKey ? Color.accentColor.opacity(0.28) : Color.black.opacity(0.12)
+        return isKey ? Color.accentColor.opacity(0.28) : NoteTheme.ink.opacity(0.12)
     }
 }
 
@@ -795,11 +822,11 @@ struct NoteRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(note.title.isEmpty ? "Untitled note" : note.title)
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.75))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.75))
                     .lineLimit(1)
                 Text(note.body.isEmpty ? "Empty note" : note.body.replacingOccurrences(of: "\n", with: "  "))
-                    .font(.custom(AppSettings.noteFontName, size: 14))
-                    .foregroundStyle(.black.opacity(0.55))
+                    .font(AppAppearance.shared.bodyFont(size: 14))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.55))
                     .lineLimit(1)
             }
 
@@ -810,14 +837,14 @@ struct NoteRow: View {
                     Text(note.archivedAt == nil ? "ACTIVE" : "ARCHIVED")
                         .font(.system(size: 9, weight: .semibold, design: .rounded))
                         .kerning(0.6)
-                        .foregroundStyle(.black.opacity(0.42))
+                        .foregroundStyle(NoteTheme.ink.opacity(0.42))
                         .padding(.horizontal, 7)
                         .frame(height: 18)
-                        .background(Color.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
+                        .background(NoteTheme.ink.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
                 }
                 Text(note.updatedAt, style: .relative)
                     .font(.system(size: 9, design: .rounded))
-                    .foregroundStyle(.black.opacity(0.34))
+                    .foregroundStyle(NoteTheme.ink.opacity(0.34))
             }
         }
     }
@@ -908,6 +935,9 @@ struct NotePreviewCard: View {
         .frame(height: fillsAvailableHeight ? nil : 336)
         .background(NoteColor.at(note.colorIndex).fill)
         .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        // The card is a sheet of pastel paper in either system appearance, so
+        // its text, caret and selection stay in the light one.
+        .environment(\.colorScheme, .light)
         .shadow(color: .black.opacity(0.11), radius: 12, y: 5)
         .padding(.horizontal, 20)
         .padding(.bottom, 20)
